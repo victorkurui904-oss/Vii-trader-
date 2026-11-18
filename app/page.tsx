@@ -83,10 +83,21 @@ const REDIRECT_URL =
   "https://burnitortrader.site/auth/deriv/callback";
 const FALLBACK_MARKETS: Market[] = [
   { symbol: "R_10", display_name: "Volatility 10 Index", market: "synthetic_index" },
+  { symbol: "R_15", display_name: "Volatility 15 Index", market: "synthetic_index" },
   { symbol: "R_25", display_name: "Volatility 25 Index", market: "synthetic_index" },
+  { symbol: "R_30", display_name: "Volatility 30 Index", market: "synthetic_index" },
   { symbol: "R_50", display_name: "Volatility 50 Index", market: "synthetic_index" },
   { symbol: "R_75", display_name: "Volatility 75 Index", market: "synthetic_index" },
+  { symbol: "R_90", display_name: "Volatility 90 Index", market: "synthetic_index" },
   { symbol: "R_100", display_name: "Volatility 100 Index", market: "synthetic_index" },
+  { symbol: "1HZ10V", display_name: "Volatility 10 (1s) Index", market: "synthetic_index" },
+  { symbol: "1HZ15V", display_name: "Volatility 15 (1s) Index", market: "synthetic_index" },
+  { symbol: "1HZ25V", display_name: "Volatility 25 (1s) Index", market: "synthetic_index" },
+  { symbol: "1HZ30V", display_name: "Volatility 30 (1s) Index", market: "synthetic_index" },
+  { symbol: "1HZ50V", display_name: "Volatility 50 (1s) Index", market: "synthetic_index" },
+  { symbol: "1HZ75V", display_name: "Volatility 75 (1s) Index", market: "synthetic_index" },
+  { symbol: "1HZ90V", display_name: "Volatility 90 (1s) Index", market: "synthetic_index" },
+  { symbol: "1HZ100V", display_name: "Volatility 100 (1s) Index", market: "synthetic_index" },
 ];
 const FREE_BOTS: BotConfig[] = [
   { name: "Even Starter", symbol: "R_10", contract: "DIGITEVEN", stake: 1, maxTrades: 3 },
@@ -192,6 +203,7 @@ function scanDigitContracts(
 }
 
 export default function HomePage() {
+  const [showIntro, setShowIntro] = useState(true);
   const [accounts, setAccounts] = useState<DerivAccount[]>([]);
   const [selectedLoginId, setSelectedLoginId] = useState("");
   const [accountError, setAccountError] = useState("");
@@ -199,6 +211,8 @@ export default function HomePage() {
   const [balance, setBalance] = useState<number | null>(null);
   const [currency, setCurrency] = useState("");
   const [markets, setMarkets] = useState(FALLBACK_MARKETS);
+  const [marketLoading, setMarketLoading] = useState(true);
+  const [marketError, setMarketError] = useState("");
   const [symbol, setSymbol] = useState("R_10");
   const [contract, setContract] = useState<DigitContract>("DIGITEVEN");
   const [barrier, setBarrier] = useState("5");
@@ -256,6 +270,55 @@ export default function HomePage() {
     masterView.status === "stopping";
 
   useEffect(() => {
+    const timer = window.setTimeout(() => setShowIntro(false), 1400);
+    return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    let client: DerivClient | undefined;
+
+    void connectDeriv()
+      .then(async (connectedClient) => {
+        client = connectedClient;
+        const response = await client.request({ active_symbols: "brief" });
+        if (cancelled) return;
+
+        const available = (response.active_symbols ?? []).filter(
+          (market) => market.market === "synthetic_index",
+        );
+        if (available.length === 0) {
+          throw new Error("Deriv returned no active synthetic indices.");
+        }
+        setMarkets(available);
+        setSymbol((current) =>
+          available.some((market) => market.symbol === current)
+            ? current
+            : available[0].symbol,
+        );
+        setMarketError("");
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setMarketError(
+            error instanceof Error
+              ? `Could not load the full Deriv market list: ${error.message}`
+              : "Could not load the full Deriv market list.",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setMarketLoading(false);
+        client?.close();
+      });
+
+    return () => {
+      cancelled = true;
+      client?.close();
+    };
+  }, []);
+
+  useEffect(() => {
     try {
       const raw = sessionStorage.getItem("deriv_accounts");
       if (!raw) {
@@ -297,10 +360,7 @@ export default function HomePage() {
     void connectDeriv(activeAccount.token)
       .then(async (connectedClient) => {
         client = connectedClient;
-        const [balanceResponse, marketResponse] = await Promise.all([
-          client.request({ balance: 1 }),
-          client.request({ active_symbols: "brief" }),
-        ]);
+        const balanceResponse = await client.request({ balance: 1 });
         if (cancelled) return;
 
         const accountBalance = balanceResponse.balance;
@@ -311,11 +371,6 @@ export default function HomePage() {
         );
         setCurrency(accountBalance?.currency ?? activeAccount.currency);
 
-        const available = (marketResponse.active_symbols ?? []).filter(
-          (market) =>
-            market.market === "synthetic_index" || market.market === "forex",
-        );
-        if (available.length > 0) setMarkets(available);
         setConnection("Connected");
       })
       .catch((error: unknown) => {
@@ -334,7 +389,7 @@ export default function HomePage() {
   }, [activeAccount]);
 
   function connectDerivAccount() {
-    if (!APP_ID) {
+    if (!APP_ID || APP_ID === "YOUR_DERIV_APP_ID") {
       setAccountError("The Deriv application ID is not configured.");
       return;
     }
@@ -343,7 +398,7 @@ export default function HomePage() {
     const authorizeUrl = new URL("https://oauth.deriv.com/oauth2/authorize");
     authorizeUrl.searchParams.set("app_id", APP_ID);
     authorizeUrl.searchParams.set("redirect_uri", REDIRECT_URL);
-    authorizeUrl.searchParams.set("l", "en");
+    authorizeUrl.searchParams.set("l", "EN");
     authorizeUrl.searchParams.set("state", state);
     window.location.assign(authorizeUrl.toString());
   }
@@ -477,10 +532,6 @@ export default function HomePage() {
   }
 
   async function runScanner() {
-    if (!activeAccount) {
-      setScanError("Connect a Deriv account to scan markets.");
-      return;
-    }
     const syntheticMarkets = markets.filter((market) => market.market === "synthetic_index");
     if (syntheticMarkets.length === 0) {
       setScanError("No synthetic indices are currently available from Deriv.");
@@ -493,12 +544,13 @@ export default function HomePage() {
     setScanCompleted(false);
     let client: DerivClient | undefined;
     try {
-      client = await connectDeriv(activeAccount.token);
+      const scanClient = await connectDeriv(activeAccount?.token);
+      client = scanClient;
       const results = await Promise.all(
         syntheticMarkets.map(async (market) => {
           const [tickResponse, historyResponse] = await Promise.all([
-            client!.request({ ticks: market.symbol }),
-            client!.request({
+            scanClient.request({ ticks: market.symbol }),
+            scanClient.request({
               ticks_history: market.symbol,
               count: Number(scanSampleSize),
               end: "latest",
@@ -820,17 +872,31 @@ export default function HomePage() {
     else void launchMaster5();
   }
 
-  const visibleScanResults = scanResults
-    .filter((result) => {
-      if (result.hitRate < Number(scanThreshold)) return false;
-      if (scanCategory === "PARITY") return result.contract === "Even" || result.contract === "Odd";
-      if (scanCategory === "OVER_UNDER") return result.contract === "Over" || result.contract === "Under";
-      if (scanCategory === "MATCHES_DIFFERS") return result.contract === "Matches" || result.contract === "Differs";
-      return true;
-    })
+  const categorizedScanResults = scanResults.filter((result) => {
+    if (scanCategory === "PARITY") return result.contract === "Even" || result.contract === "Odd";
+    if (scanCategory === "OVER_UNDER") return result.contract === "Over" || result.contract === "Under";
+    if (scanCategory === "MATCHES_DIFFERS") return result.contract === "Matches" || result.contract === "Differs";
+    return true;
+  });
+  const bestScanResult = categorizedScanResults[0];
+  const visibleScanResults = categorizedScanResults
+    .filter((result) => result.hitRate >= Number(scanThreshold))
     .slice(0, 20);
 
   const selectedMarket = markets.find((market) => market.symbol === symbol);
+
+  if (showIntro) {
+    return (
+      <main className="intro-screen" aria-live="polite">
+        <div className="intro-card">
+          <span className="intro-brand-mark">B</span>
+          <p className="intro-brand">Burnitor<span>Trader</span></p>
+          <div className="intro-spinner" role="status" aria-label="Loading BurnitorTrader" />
+          <p className="intro-message">Loading your trading workspace…</p>
+        </div>
+      </main>
+    );
+  }
 
   return (
     <main className="dashboard">
@@ -846,7 +912,15 @@ export default function HomePage() {
           <a className="nav-link" href="#bot-builder"><span>⚙</span> Bot builder</a>
           <a className="nav-link" href="#analysis"><span>⌁</span> Analysis tools</a>
           <a className="nav-link" href="#free-bots"><span>✦</span> Free bots</a>
-          <a className="nav-link" href="#scanner"><span>⌕</span> AI scanner</a>
+          <a
+            className="nav-link"
+            href="#scanner"
+            onClick={() => {
+              window.setTimeout(() => void runScanner(), 0);
+            }}
+          >
+            <span>⌕</span> AI scanner
+          </a>
         </nav>
         <div className="sidebar-bottom">
           <div className="help-card">
@@ -912,11 +986,11 @@ export default function HomePage() {
             <span className="banner-sheen" />
           </section>
 
-          {(accountError || connection === "Not connected") && (
-            <div className={`notice ${accountError ? "notice-error" : ""}`}>
-              <span>{accountError || "Connect a Deriv account to load your balance, scan markets, and place trades."}</span>
-              {!activeAccount && <button type="button" onClick={connectDerivAccount}>Connect account</button>}
-              {accountError && <button type="button" onClick={() => setAccountError("")} aria-label="Dismiss error">×</button>}
+          {(accountError || marketError || connection === "Not connected") && (
+            <div className={`notice ${accountError || marketError ? "notice-error" : ""}`}>
+              <span>{accountError || marketError || "Connect a Deriv account to load your balance and place trades. Market scanning is available without login."}</span>
+              {!activeAccount && !accountError && !marketError && <button type="button" onClick={connectDerivAccount}>Connect account</button>}
+              {(accountError || marketError) && <button type="button" onClick={() => { setAccountError(""); setMarketError(""); }} aria-label="Dismiss error">×</button>}
             </div>
           )}
 
@@ -932,9 +1006,9 @@ export default function HomePage() {
               <small>{isLive ? "Live orders can lose money." : "Use demo to test your setup."}</small>
             </article>
             <article className="metric-card">
-              <div className="metric-heading"><span>Available markets</span><span className="metric-icon blue">⌁</span></div>
+              <div className="metric-heading"><span>Available synthetic indices</span><span className="metric-icon blue">⌁</span></div>
               <strong>{markets.length}</strong>
-              <small>Deriv synthetic and forex markets</small>
+              <small>Includes 1-second volatility indices</small>
             </article>
           </section>
 
@@ -992,9 +1066,9 @@ export default function HomePage() {
             <section className="panel scanner-panel" id="scanner">
               <div className="panel-heading">
                 <div><span className="section-kicker">MARKET WATCH</span><h2>AI scanner</h2></div>
-                <span className="live-indicator"><i /> LIVE DATA</span>
+                <span className="live-indicator"><i /> {marketLoading ? "LOADING MARKETS" : marketError ? "FALLBACK MARKETS" : "LIVE DATA"}</span>
               </div>
-              <p className="panel-description">Ranks synthetic indices by the historical frequency of digit-contract outcomes in the selected recent tick sample.</p>
+              <p className="panel-description">Compare live synthetic indices, including 1-second volatility indices, by recent historical digit outcomes. No account login is needed to scan.</p>
               <div className="scanner-filters">
                 <label className="field-wrap">
                   <span className="field-label">Minimum historical rate</span>
@@ -1021,10 +1095,17 @@ export default function HomePage() {
                   </select>
                 </label>
               </div>
-              <button className="scan-button" type="button" disabled={!activeAccount || scanBusy} onClick={() => void runScanner()}>
-                {scanBusy ? <><span className="spinner" /> Scanning synthetic indices…</> : "Rank synthetic indices"}
+              <button className="scan-button" type="button" disabled={scanBusy} onClick={() => void runScanner()}>
+                {scanBusy ? <><span className="spinner" /> Scanning synthetic indices…</> : "Scan markets now"}
               </button>
               {scanError && <p className="feedback error-text" role="alert">{scanError}</p>}
+              {scanCompleted && bestScanResult && (
+                <div className="best-scan-result">
+                  <span className="best-scan-label">HIGHEST HISTORICAL FREQUENCY</span>
+                  <strong>{bestScanResult.name} · {bestScanResult.contract}{bestScanResult.barrier === undefined ? "" : ` ${bestScanResult.barrier}`}</strong>
+                  <span>{bestScanResult.hitRate.toFixed(1)}% ({bestScanResult.hits}/{bestScanResult.sampleSize} ticks)</span>
+                </div>
+              )}
               {visibleScanResults.length > 0 ? (
                 <div className="scan-list">
                   {visibleScanResults.map((result, index) => (
@@ -1037,11 +1118,11 @@ export default function HomePage() {
                   ))}
                 </div>
               ) : scanCompleted ? (
-                <div className="empty-scanner"><strong>No results at {scanThreshold}%+</strong><span>Try 78%, another contract group, or a fresh scan.</span></div>
+                <div className="empty-scanner"><strong>No results at {scanThreshold}%+</strong><span>{bestScanResult ? "The highest historical frequency is shown above; lower the filter to compare more results." : "Try another contract group or run a fresh scan."}</span></div>
               ) : (
                 <div className="empty-scanner"><span className="scan-graphic">⌁</span><strong>Ranked digit results</strong><span>Scan recent ticks to compare Even/Odd, Over/Under, Matches, and Differs across synthetic indices.</span></div>
               )}
-              <div className="scanner-disclaimer">Percentages show historical hit frequency in the selected sample—not the chance of winning the next trade. They do not account for payout or guarantee profit. The scanner is statistical, not AI-powered.</div>
+              <div className="scanner-disclaimer">Percentages show historical frequency in the selected sample—not the chance of winning the next trade. Results do not account for payout or guarantee profit. This is a statistical scanner, not a predictive AI model.</div>
             </section>
           </div>
 

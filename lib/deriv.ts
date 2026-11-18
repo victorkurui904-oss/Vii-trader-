@@ -46,8 +46,11 @@ export type DerivClient = {
   close: () => void;
 };
 
-export async function connectDeriv(token: string): Promise<DerivClient> {
-  if (!process.env.NEXT_PUBLIC_DERIV_APP_ID) {
+export async function connectDeriv(token?: string): Promise<DerivClient> {
+  if (
+    !process.env.NEXT_PUBLIC_DERIV_APP_ID ||
+    process.env.NEXT_PUBLIC_DERIV_APP_ID === "YOUR_DERIV_APP_ID"
+  ) {
     throw new Error("The Deriv application ID is not configured.");
   }
 
@@ -229,11 +232,13 @@ export async function connectDeriv(token: string): Promise<DerivClient> {
     );
   });
 
-  try {
-    await request({ authorize: token });
-  } catch (error) {
-    socket.close();
-    throw error;
+  if (token) {
+    try {
+      await request({ authorize: token });
+    } catch (error) {
+      socket.close();
+      throw error;
+    }
   }
 
   return {

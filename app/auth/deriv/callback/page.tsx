@@ -16,6 +16,12 @@ export default function DerivCallbackPage() {
     const params = new URLSearchParams(window.location.search);
     window.history.replaceState({}, "", window.location.pathname);
     const error = params.get("error");
+    if (error) {
+      setMessage(params.get("error_description") || "Deriv authorization failed.");
+      sessionStorage.removeItem("deriv_oauth_state");
+      return;
+    }
+
     const returnedState = params.get("state");
     const expectedState = sessionStorage.getItem("deriv_oauth_state");
 
@@ -26,11 +32,6 @@ export default function DerivCallbackPage() {
     }
 
     sessionStorage.removeItem("deriv_oauth_state");
-
-    if (error) {
-      setMessage(params.get("error_description") || "Deriv authorization failed.");
-      return;
-    }
 
     const accounts: DerivAccount[] = [];
 

@@ -449,36 +449,42 @@ export default function HomePage() {
         );
         setMarketError("");
         const marketsBySymbol = new Map(available.map((market) => [market.symbol, market]));
-        await client.subscribeTicks(available.map((market) => market.symbol), (tick) => {
-          if (!tick.symbol || typeof tick.quote !== "number") return;
-          const market = marketsBySymbol.get(tick.symbol);
-          if (!market) return;
-          const pipSize = tick.pip_size ?? market.pip_size;
-          const digit = getLastDigit(tick.quote, pipSize);
-          if (digit === null) return;
+        for (const market of available) {
+          await client.subscribeTicks(market.symbol, (tick) => {
+            if (typeof tick.quote !== "number") return;
+            const currentMarket = tick.symbol
+              ? marketsBySymbol.get(tick.symbol)
+              : undefined;
+            if (!currentMarket) return;
+            const pipSize = tick.pip_size ?? currentMarket.pip_size;
+            const digit = getLastDigit(tick.quote, pipSize);
+            if (digit === null) return;
 
-          const prices = liveTicksBySymbolRef.current[market.symbol] ?? [];
-          prices.push(tick.quote);
-          if (prices.length > 1000) prices.shift();
-          liveTicksBySymbolRef.current[market.symbol] = prices;
+            const prices = liveTicksBySymbolRef.current[currentMarket.symbol] ?? [];
+            prices.push(tick.quote);
+            if (prices.length > 1000) prices.shift();
+            liveTicksBySymbolRef.current[currentMarket.symbol] = prices;
 
-          if (selectedSymbolRef.current === market.symbol) {
-            const counts = Array.from({ length: 10 }, () => 0);
-            for (const price of prices) {
-              const recentDigit = getLastDigit(price, pipSize);
-              if (recentDigit !== null) counts[recentDigit] += 1;
+            if (selectedSymbolRef.current === currentMarket.symbol) {
+              const counts = Array.from({ length: 10 }, () => 0);
+              for (const price of prices) {
+                const recentDigit = getLastDigit(price, pipSize);
+                if (recentDigit !== null) counts[recentDigit] += 1;
+              }
+              setLiveDigitStats({
+                symbol: currentMarket.symbol,
+                digit,
+                quote: tick.quote,
+                counts,
+              });
             }
-            setLiveDigitStats({
-              symbol: market.symbol,
-              digit,
-              quote: tick.quote,
-              counts,
-            });
-          }
 
-          const masterRun = masterRunRef.current;
-          if (masterRun?.symbol === market.symbol) handleMaster5Tick(masterRun, tick);
-        });
+            const masterRun = masterRunRef.current;
+            if (masterRun?.symbol === currentMarket.symbol) {
+              handleMaster5Tick(masterRun, tick);
+            }
+          });
+        }
       } catch (error) {
         client?.close();
         if (marketDataClientRef.current === client) marketDataClientRef.current = null;

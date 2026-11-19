@@ -39,7 +39,7 @@ export type DerivTick = NonNullable<DerivResponse["tick"]>;
 export type DerivClient = {
   request: (payload: Record<string, unknown>) => Promise<DerivResponse>;
   subscribeTicks: (
-    symbol: string,
+    symbol: string | string[],
     onTick: (tick: DerivTick) => void,
   ) => Promise<() => Promise<void>>;
   waitForContract: (contractId: number) => Promise<number>;
@@ -148,8 +148,13 @@ export async function connectDeriv(accountId?: string): Promise<DerivClient> {
     });
 
   const subscribeTicks: DerivClient["subscribeTicks"] = async (symbol, onTick) => {
+    const symbols = new Set(Array.isArray(symbol) ? symbol : [symbol]);
     const handler = (response: DerivResponse) => {
-      if (response.msg_type === "tick" && response.tick?.symbol === symbol) {
+      if (
+        response.msg_type === "tick" &&
+        response.tick?.symbol &&
+        symbols.has(response.tick.symbol)
+      ) {
         onTick(response.tick);
       }
     };

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 import {
   connectDeriv,
   type DerivClient,
@@ -48,6 +49,11 @@ type BotConfig = {
   barrier?: number;
   stake: number;
   maxTrades: number;
+  stopLoss?: number;
+  takeProfit?: number;
+  martingaleEnabled?: boolean;
+  multiplier?: number;
+  duration?: number;
 };
 
 type BotStatus = "idle" | "starting" | "running" | "stopping" | "stopped" | "error";
@@ -78,6 +84,38 @@ type BotView = {
   stake: number;
   message: string;
 };
+
+type LiveDigitStats = {
+  symbol: string;
+  digit: number;
+  quote: number;
+  counts: number[];
+};
+
+type ManualRunConfig = {
+  symbol: string;
+  contract: DigitContract;
+  barrier?: number;
+  stake: number;
+  stopLoss: number;
+  takeProfit: number;
+  martingaleEnabled: boolean;
+  multiplier: number;
+  duration: number;
+  maxTrades: number;
+};
+
+type ManualRun = ManualRunConfig & {
+  client?: DerivClient;
+  running: boolean;
+  inTrade: boolean;
+  currentStake: number;
+  trades: number;
+  profit: number;
+  stopMessage: string;
+};
+
+const TICK_DURATIONS = [1, 2, 5, 10];
 
 const FALLBACK_MARKETS: Market[] = [
   { symbol: "R_10", display_name: "Volatility 10 Index", market: "synthetic_index" },
@@ -217,6 +255,68 @@ function scanDigitContracts(
   return results;
 }
 
+function contractFromScanResult(result: ScanResult): DigitContract {
+  switch (result.contract) {
+    case "Even": return "DIGITEVEN";
+    case "Odd": return "DIGITODD";
+    case "Over": return "DIGITOVER";
+    case "Under": return "DIGITUNDER";
+    case "Matches": return "DIGITMATCH";
+    case "Differs": return "DIGITDIFF";
+  }
+}
+
+function DigitVisualizer({
+  symbol,
+  stats,
+}: {
+  symbol: string;
+  stats: LiveDigitStats | null;
+}) {
+  const counts = stats?.symbol === symbol ? stats.counts : Array.from({ length: 10 }, () => 0);
+  const sampleSize = counts.reduce((total, count) => total + count, 0);
+  const maxCount = Math.max(...counts);
+  const minCount = Math.min(...counts);
+  const activeDigit = stats?.symbol === symbol ? stats.digit : -1;
+
+  return (
+    <div className="digit-visualizer" aria-label={`${symbol} live last-digit frequency`}>
+      <div className="digit-visualizer-heading">
+        <div><strong>Live last-digit frequency</strong><small>{symbol} · {sampleSize} recent ticks</small></div>
+        <span className="live-indicator"><i /> {stats?.symbol === symbol ? "LIVE" : "WAITING"}</span>
+      </div>
+      {[0, 1].map((row) => {
+        const rowDigits = Array.from({ length: 5 }, (_, index) => row * 5 + index);
+        const rowStyle = {
+          "--digit-position": String(activeDigit >= 0 && Math.floor(activeDigit / 5) === row ? activeDigit % 5 : 0),
+        } as CSSProperties & { "--digit-position": string };
+        return (
+          <div className={`digit-row ${activeDigit >= 0 && Math.floor(activeDigit / 5) === row ? "has-active" : ""}`} key={row}>
+            {rowDigits.map((digit) => {
+              const percentage = sampleSize > 0 ? (counts[digit] / sampleSize) * 100 : 0;
+              return (
+                <div
+                  className={`digit-cell${digit === activeDigit ? " digit-active" : ""}${sampleSize > 0 && counts[digit] === maxCount ? " digit-highest" : ""}${sampleSize > 0 && minCount < maxCount && counts[digit] === minCount ? " digit-lowest" : ""}`}
+                  key={digit}
+                  aria-label={`Digit ${digit}: ${percentage.toFixed(1)}%`}
+                >
+                  <span className="digit-circle">{digit}</span>
+                  <span className="digit-frequency">{percentage.toFixed(1)}%</span>
+                </div>
+              );
+            })}
+            <span className="digit-pointer" style={rowStyle} aria-hidden="true">▼</span>
+          </div>
+        );
+      })}
+      <div className="digit-visualizer-footer">
+        <span>{stats?.symbol === symbol ? `Latest digit: ${stats.digit} · ${stats.quote}` : "Waiting for the next Deriv tick…"}</span>
+        <span><i className="legend-high" /> Highest <i className="legend-low" /> Lowest</span>
+      </div>
+    </div>
+  );
+}
+
 export default function HomePage() {
   const [showIntro, setShowIntro] = useState(true);
   const [accounts, setAccounts] = useState<DerivAccount[]>([]);
@@ -232,6 +332,20 @@ export default function HomePage() {
   const [contract, setContract] = useState<DigitContract>("DIGITEVEN");
   const [barrier, setBarrier] = useState("5");
   const [stake, setStake] = useState("1");
+  const [duration, setDuration] = useState(1);
+  const [manualStopLoss, setManualStopLoss] = useState("5");
+  const [manualTakeProfit, setManualTakeProfit] = useState("5");
+  const [manualMartingale, setManualMartingale] = useState(false);
+  const [manualMultiplier, setManualMultiplier] = useState("2");
+  const [manualMaxTrades, setManualMaxTrades] = useState("20");
+  const [manualView, setManualView] = useState<BotView>({
+    status: "idle",
+    trades: 0,
+    profit: 0,
+    stake: 1,
+    message: "",
+  });
+  const [liveDigitStats, setLiveDigitStats] = useState<LiveDigitStats | null>(null);
   const [tradeBusy, setTradeBusy] = useState(false);
   const [confirmLive, setConfirmLive] = useState(false);
   const [tradeMessage, setTradeMessage] = useState("");
@@ -244,11 +358,13 @@ export default function HomePage() {
     barrier?: number;
     symbol: string;
     amount: number;
+    duration: number;
   } | null>(null);
   const tradeClientRef = useRef<DerivClient | null>(null);
   const [scanResults, setScanResults] = useState<ScanResult[]>([]);
   const [scanBusy, setScanBusy] = useState(false);
   const [scanError, setScanError] = useState("");
+  const [scanCoverage, setScanCoverage] = useState("");
   const [scanCompleted, setScanCompleted] = useState(false);
   const [scanThreshold, setScanThreshold] = useState("78");
   const [scanSampleSize, setScanSampleSize] = useState("500");
@@ -271,7 +387,13 @@ export default function HomePage() {
     message: "",
   });
   const [confirmMasterLive, setConfirmMasterLive] = useState(false);
+  const [confirmManualLive, setConfirmManualLive] = useState(false);
   const masterRunRef = useRef<Master5Run | null>(null);
+  const manualRunRef = useRef<ManualRun | null>(null);
+  const pendingManualConfigRef = useRef<ManualRunConfig | null>(null);
+  const marketDataClientRef = useRef<DerivClient | null>(null);
+  const liveTicksBySymbolRef = useRef<Record<string, Array<number | string>>>({});
+  const selectedSymbolRef = useRef(symbol);
 
   const activeAccount = useMemo(
     () => accounts.find((account) => account.loginId === selectedLoginId),
@@ -283,6 +405,11 @@ export default function HomePage() {
     masterView.status === "starting" ||
     masterView.status === "running" ||
     masterView.status === "stopping";
+  const manualIsActive =
+    manualView.status === "starting" ||
+    manualView.status === "running" ||
+    manualView.status === "stopping";
+  selectedSymbolRef.current = symbol;
 
   useEffect(() => {
     const timer = window.setTimeout(() => setShowIntro(false), 1400);
@@ -293,12 +420,15 @@ export default function HomePage() {
     let cancelled = false;
     let client: DerivClient | undefined;
 
-    void connectDeriv()
-      .then(async (connectedClient) => {
-        client = connectedClient;
+    void (async () => {
+      try {
+        client = await connectDeriv();
+        if (cancelled) {
+          client.close();
+          return;
+        }
+        marketDataClientRef.current = client;
         const response = await client.request({ active_symbols: "brief" });
-        if (cancelled) return;
-
         const available = (response.active_symbols ?? [])
           .filter((market) => market.market === "synthetic_index")
           .map((market) => ({
@@ -310,6 +440,7 @@ export default function HomePage() {
         if (available.length === 0) {
           throw new Error("Deriv returned no active synthetic indices.");
         }
+        if (cancelled) return;
         setMarkets(available);
         setSymbol((current) =>
           available.some((market) => market.symbol === current)
@@ -317,23 +448,55 @@ export default function HomePage() {
             : available[0].symbol,
         );
         setMarketError("");
-      })
-      .catch((error: unknown) => {
+        const marketsBySymbol = new Map(available.map((market) => [market.symbol, market]));
+        await client.subscribeTicks(available.map((market) => market.symbol), (tick) => {
+          if (!tick.symbol || typeof tick.quote !== "number") return;
+          const market = marketsBySymbol.get(tick.symbol);
+          if (!market) return;
+          const pipSize = tick.pip_size ?? market.pip_size;
+          const digit = getLastDigit(tick.quote, pipSize);
+          if (digit === null) return;
+
+          const prices = liveTicksBySymbolRef.current[market.symbol] ?? [];
+          prices.push(tick.quote);
+          if (prices.length > 1000) prices.shift();
+          liveTicksBySymbolRef.current[market.symbol] = prices;
+
+          if (selectedSymbolRef.current === market.symbol) {
+            const counts = Array.from({ length: 10 }, () => 0);
+            for (const price of prices) {
+              const recentDigit = getLastDigit(price, pipSize);
+              if (recentDigit !== null) counts[recentDigit] += 1;
+            }
+            setLiveDigitStats({
+              symbol: market.symbol,
+              digit,
+              quote: tick.quote,
+              counts,
+            });
+          }
+
+          const masterRun = masterRunRef.current;
+          if (masterRun?.symbol === market.symbol) handleMaster5Tick(masterRun, tick);
+        });
+      } catch (error) {
+        client?.close();
+        if (marketDataClientRef.current === client) marketDataClientRef.current = null;
         if (!cancelled) {
           setMarketError(
             error instanceof Error
-              ? `Could not load the full Deriv market list: ${error.message}`
-              : "Could not load the full Deriv market list.",
+              ? `Could not load the Deriv live market feed: ${error.message}`
+              : "Could not load the Deriv live market feed.",
           );
         }
-      })
-      .finally(() => {
+      } finally {
         if (!cancelled) setMarketLoading(false);
-        client?.close();
-      });
+      }
+    })();
 
     return () => {
       cancelled = true;
+      if (marketDataClientRef.current === client) marketDataClientRef.current = null;
       client?.close();
     };
   }, []);
@@ -524,6 +687,10 @@ export default function HomePage() {
   }
 
   async function reviewTrade() {
+    if (masterIsActive || manualIsActive) {
+      setTradeError("Stop the active strategy before preparing a separate trade.");
+      return;
+    }
     if (!activeAccount) {
       setTradeError("Connect a Deriv account before trading.");
       return;
@@ -559,7 +726,7 @@ export default function HomePage() {
         basis: "stake",
         contract_type: contract,
         currency: currency || activeAccount.currency,
-        duration: 1,
+        duration,
         duration_unit: "t",
         underlying_symbol: symbol,
       };
@@ -580,6 +747,7 @@ export default function HomePage() {
         barrier: contractNeedsBarrier(contract) ? barrierValue : undefined,
         symbol,
         amount,
+        duration,
       });
       tradeClientRef.current = client;
       client = undefined;
@@ -636,45 +804,306 @@ export default function HomePage() {
     setConfirmLive(false);
   }
 
+  function finishManualRun(
+    run: ManualRun,
+    message: string,
+    status: "stopped" | "error" = "stopped",
+  ) {
+    run.running = false;
+    run.inTrade = false;
+    run.client?.close();
+    if (manualRunRef.current === run) manualRunRef.current = null;
+    setManualView({
+      status,
+      trades: run.trades,
+      profit: run.profit,
+      stake: run.currentStake,
+      message,
+    });
+  }
+
+  function stopManualRun(
+    run: ManualRun,
+    message: string,
+    status: "stopped" | "error" = "stopped",
+  ) {
+    run.running = false;
+    run.stopMessage = message;
+    if (run.inTrade) {
+      setManualView({
+        status: "stopping",
+        trades: run.trades,
+        profit: run.profit,
+        stake: run.currentStake,
+        message: "Stopping after the open contract settles.",
+      });
+      return;
+    }
+    finishManualRun(run, message, status);
+  }
+
+  async function executeManualRun(run: ManualRun) {
+    if (!run.client) return;
+    while (run.running) {
+      const remainingLossBudget = run.stopLoss + run.profit;
+      if (run.currentStake > Math.min(1000, remainingLossBudget)) {
+        finishManualRun(run, "Stopped before the next entry: stake exceeds the remaining stop-loss budget.");
+        return;
+      }
+
+      try {
+        const proposalRequest: Record<string, unknown> = {
+          proposal: 1,
+          amount: run.currentStake,
+          basis: "stake",
+          contract_type: run.contract,
+          currency: currency || activeAccount?.currency || "USD",
+          duration: run.duration,
+          duration_unit: "t",
+          underlying_symbol: run.symbol,
+        };
+        if (contractNeedsBarrier(run.contract)) {
+          proposalRequest.barrier = String(run.barrier);
+        }
+        const proposalResponse = await run.client.request(proposalRequest);
+        const proposal = proposalResponse.proposal;
+        if (!proposal?.id || typeof proposal.ask_price !== "number") {
+          throw new Error("Deriv did not return a valid manual-trade proposal.");
+        }
+        if (!run.running) {
+          finishManualRun(run, run.stopMessage || "Stopped before the next entry.");
+          return;
+        }
+
+        run.inTrade = true;
+        const buyResponse = await run.client.request({
+          buy: proposal.id,
+          price: proposal.ask_price,
+        });
+        const contractId = buyResponse.buy?.contract_id;
+        if (typeof contractId !== "number") {
+          run.inTrade = false;
+          throw new Error("Deriv did not confirm the manual trade.");
+        }
+        run.trades += 1;
+        setManualView({
+          status: "running",
+          trades: run.trades,
+          profit: run.profit,
+          stake: run.currentStake,
+          message: `Trade ${run.trades} opened: ${contractLabel(run.contract, run.barrier ?? "")} · ${run.duration} tick(s). Waiting for settlement.`,
+        });
+        const tradeProfit = await run.client.waitForContract(contractId);
+        run.inTrade = false;
+        run.profit += tradeProfit;
+        run.currentStake =
+          tradeProfit < 0 && run.martingaleEnabled
+            ? run.currentStake * run.multiplier
+            : run.stake;
+
+        if (run.profit >= run.takeProfit) {
+          finishManualRun(run, `Take-profit reached: +${run.profit.toFixed(2)} ${currency || activeAccount?.currency || ""}.`);
+          return;
+        }
+        if (run.profit <= -run.stopLoss) {
+          finishManualRun(run, `Stop-loss reached: ${run.profit.toFixed(2)} ${currency || activeAccount?.currency || ""}.`);
+          return;
+        }
+        if (run.trades >= run.maxTrades) {
+          finishManualRun(run, `Trade limit reached (${run.maxTrades}). Session P/L: ${run.profit.toFixed(2)}.`);
+          return;
+        }
+        if (!run.running) {
+          finishManualRun(run, run.stopMessage || "Stopped by you.");
+          return;
+        }
+        setManualView({
+          status: "running",
+          trades: run.trades,
+          profit: run.profit,
+          stake: run.currentStake,
+          message: `Last result ${tradeProfit >= 0 ? "+" : ""}${tradeProfit.toFixed(2)}. Next stake: ${run.currentStake.toFixed(2)}.`,
+        });
+      } catch (error) {
+        const tradeWasInFlight = run.inTrade;
+        run.inTrade = false;
+        if (!run.running && !tradeWasInFlight) {
+          finishManualRun(run, run.stopMessage || "Stopped by you.");
+          return;
+        }
+        finishManualRun(
+          run,
+          error instanceof Error ? error.message : "Manual strategy stopped after a Deriv error.",
+          "error",
+        );
+        return;
+      }
+    }
+  }
+
+  async function launchManualRun(config: ManualRunConfig) {
+    if (!activeAccount || manualRunRef.current) return;
+    const run: ManualRun = {
+      ...config,
+      running: true,
+      inTrade: false,
+      currentStake: config.stake,
+      trades: 0,
+      profit: 0,
+      stopMessage: "",
+    };
+    manualRunRef.current = run;
+    setManualView({
+      status: "starting",
+      trades: 0,
+      profit: 0,
+      stake: run.currentStake,
+      message: `Connecting to ${isLive ? "real" : "demo"} account…`,
+    });
+    setConfirmManualLive(false);
+    pendingManualConfigRef.current = null;
+
+    try {
+      run.client = await connectDeriv(activeAccount.accountId);
+      if (!run.running) {
+        run.client.close();
+        return;
+      }
+      setManualView({
+        status: "running",
+        trades: 0,
+        profit: 0,
+        stake: run.currentStake,
+        message: `Running ${contractLabel(run.contract, run.barrier ?? "")} on ${run.symbol}; limits are active.`,
+      });
+      void executeManualRun(run);
+    } catch (error) {
+      finishManualRun(
+        run,
+        error instanceof Error ? error.message : "Could not start the manual strategy.",
+        "error",
+      );
+    }
+  }
+
+  function requestManualStart(overrides: Partial<ManualRunConfig> = {}) {
+    if (masterIsActive || confirmLive || confirmMasterLive || tradeBusy) {
+      setManualView((view) => ({ ...view, status: "error", message: "Finish or cancel the current trade review before starting a strategy." }));
+      return;
+    }
+    if (!activeAccount) {
+      setManualView((view) => ({ ...view, status: "error", message: "Connect a Deriv account before starting a manual strategy." }));
+      return;
+    }
+    if (manualRunRef.current) return;
+
+    const selectedContract = overrides.contract ?? contract;
+    const selectedBarrier = overrides.barrier ?? Number(barrier);
+    const config: ManualRunConfig = {
+      symbol: overrides.symbol ?? symbol,
+      contract: selectedContract,
+      barrier: contractNeedsBarrier(selectedContract) ? selectedBarrier : undefined,
+      stake: overrides.stake ?? Number(stake),
+      stopLoss: overrides.stopLoss ?? Number(manualStopLoss),
+      takeProfit: overrides.takeProfit ?? Number(manualTakeProfit),
+      martingaleEnabled: overrides.martingaleEnabled ?? manualMartingale,
+      multiplier: overrides.multiplier ?? Number(manualMultiplier),
+      duration: overrides.duration ?? duration,
+      maxTrades: overrides.maxTrades ?? Number(manualMaxTrades),
+    };
+    if (!digitMarkets.some((market) => market.symbol === config.symbol)) {
+      setManualView((view) => ({ ...view, status: "error", message: "Choose an available Volatility or Jump index." }));
+      return;
+    }
+    if (!Number.isFinite(config.stake) || config.stake < 0.35 || config.stake > 1000) {
+      setManualView((view) => ({ ...view, status: "error", message: "Stake must be between 0.35 and 1,000." }));
+      return;
+    }
+    if (
+      contractNeedsBarrier(config.contract) &&
+      !validDigitBarrier(config.contract, config.barrier ?? Number.NaN)
+    ) {
+      setManualView((view) => ({ ...view, status: "error", message: "Enter a valid barrier digit for the selected contract." }));
+      return;
+    }
+    if (!Number.isFinite(config.stopLoss) || config.stopLoss <= 0 || !Number.isFinite(config.takeProfit) || config.takeProfit <= 0) {
+      setManualView((view) => ({ ...view, status: "error", message: "Stop Loss and Take Profit must be positive." }));
+      return;
+    }
+    if (config.stake > config.stopLoss) {
+      setManualView((view) => ({ ...view, status: "error", message: "Stop Loss must cover at least the starting stake." }));
+      return;
+    }
+    if (
+      config.martingaleEnabled &&
+      (!Number.isFinite(config.multiplier) || config.multiplier <= 1 || config.multiplier > 5)
+    ) {
+      setManualView((view) => ({ ...view, status: "error", message: "Martingale multiplier must be greater than 1 and no more than 5." }));
+      return;
+    }
+    if (!TICK_DURATIONS.includes(config.duration)) {
+      setManualView((view) => ({ ...view, status: "error", message: "Choose a supported duration from 1, 2, 5, or 10 ticks." }));
+      return;
+    }
+    if (!Number.isInteger(config.maxTrades) || config.maxTrades < 1 || config.maxTrades > 100) {
+      setManualView((view) => ({ ...view, status: "error", message: "Trade limit must be between 1 and 100." }));
+      return;
+    }
+
+    setSymbol(config.symbol);
+    setContract(config.contract);
+    setBarrier(String(config.barrier ?? 5));
+    setStake(String(config.stake));
+    setDuration(config.duration);
+    pendingManualConfigRef.current = config;
+    if (isLive) setConfirmManualLive(true);
+    else void launchManualRun(config);
+  }
+
+  function loadScanResultToBuilder(result: ScanResult) {
+    const nextContract = contractFromScanResult(result);
+    setSymbol(result.symbol);
+    setContract(nextContract);
+    setBarrier(String(result.barrier ?? 5));
+    setBotName(`AI scan ${result.symbol} ${result.contract}`);
+    setBotStake(stake);
+    setMaxTrades(manualMaxTrades);
+    document.getElementById("bot-builder")?.scrollIntoView({ behavior: "smooth" });
+    setBotMessage(`Loaded ${result.symbol} · ${result.contract}${result.barrier === undefined ? "" : ` ${result.barrier}`} from live digit statistics. Review risk settings before saving.`);
+  }
+
   async function runScanner() {
-    const syntheticMarkets = markets.filter((market) => market.market === "synthetic_index");
+    const syntheticMarkets = markets.filter(
+      (market) =>
+        market.market === "synthetic_index" &&
+        /volatility|jump/i.test(market.display_name),
+    );
     if (syntheticMarkets.length === 0) {
-      setScanError("No synthetic indices are currently available from Deriv.");
+      setScanError("No live Volatility or Jump indices are currently available from Deriv.");
       return;
     }
 
     setScanBusy(true);
     setScanError("");
+    setScanCoverage("");
     setScanResults([]);
     setScanCompleted(false);
-    let client: DerivClient | undefined;
     try {
-      const scanClient = await connectDeriv();
-      client = scanClient;
-      const results = await Promise.all(
-        syntheticMarkets.map(async (market) => {
-          const historyResponse = await scanClient.request({
-            ticks_history: market.symbol,
-            count: Number(scanSampleSize),
-            end: "latest",
-            style: "ticks",
-          });
-          const history = historyResponse.history;
-          if (!history?.prices?.length) {
-            throw new Error(`Deriv returned no tick history for ${market.symbol}.`);
-          }
-          const pipSize =
-            market.pip_size ?? historyResponse.pip_size ?? history.pip_size;
-          if (
-            typeof pipSize !== "number" ||
-            !Number.isInteger(pipSize) ||
-            pipSize < 0 ||
-            pipSize > 10
-          ) {
-            throw new Error(`Deriv returned an invalid price precision for ${market.symbol}.`);
-          }
-          return scanDigitContracts(market, history.prices, pipSize);
-        }),
+      const sampleSize = Number(scanSampleSize);
+      const readyMarkets = syntheticMarkets.filter(
+        (market) => (liveTicksBySymbolRef.current[market.symbol]?.length ?? 0) >= 20,
+      );
+      if (readyMarkets.length === 0) {
+        throw new Error("The live feed is warming up. Wait until at least 20 ticks have arrived for an index, then scan again.");
+      }
+      const results = readyMarkets.map((market) => {
+        const prices = liveTicksBySymbolRef.current[market.symbol] ?? [];
+        return scanDigitContracts(market, prices.slice(-sampleSize), market.pip_size);
+      });
+      setScanCoverage(
+        readyMarkets.length === syntheticMarkets.length
+          ? `Live statistics from ${readyMarkets.length} Volatility and Jump indices.`
+          : `Live statistics for ${readyMarkets.length} of ${syntheticMarkets.length} indices; remaining feeds need at least 20 ticks.`,
       );
       setScanResults(
         results
@@ -685,7 +1114,6 @@ export default function HomePage() {
     } catch (error) {
       setScanError(error instanceof Error ? error.message : "Market scan failed.");
     } finally {
-      client?.close();
       setScanBusy(false);
     }
   }
@@ -697,12 +1125,26 @@ export default function HomePage() {
       setBotMessage("Enter a name and a stake between 0.35 and 1,000.");
       return;
     }
-    if (!Number.isInteger(tradeLimit) || tradeLimit < 1 || tradeLimit > 20) {
-      setBotMessage("Set a daily trade limit between 1 and 20.");
+    if (!Number.isInteger(tradeLimit) || tradeLimit < 1 || tradeLimit > 100) {
+      setBotMessage("Set a trade limit between 1 and 100.");
       return;
     }
     if (contractNeedsBarrier(contract) && !validDigitBarrier(contract, Number(barrier))) {
       setBotMessage("Enter a valid barrier digit for the selected contract.");
+      return;
+    }
+    if (
+      !Number.isFinite(Number(manualStopLoss)) ||
+      Number(manualStopLoss) <= 0 ||
+      amount > Number(manualStopLoss) ||
+      !Number.isFinite(Number(manualTakeProfit)) ||
+      Number(manualTakeProfit) <= 0 ||
+      (manualMartingale &&
+        (!Number.isFinite(Number(manualMultiplier)) ||
+          Number(manualMultiplier) <= 1 ||
+          Number(manualMultiplier) > 5))
+    ) {
+      setBotMessage("Enter positive Stop Loss and Take Profit values, set Stop Loss at least equal to the stake, and use a Martingale multiplier from 1.01 to 5 when enabled.");
       return;
     }
     const config: BotConfig = {
@@ -712,6 +1154,11 @@ export default function HomePage() {
       barrier: contractNeedsBarrier(contract) ? Number(barrier) : undefined,
       stake: amount,
       maxTrades: tradeLimit,
+      stopLoss: Number(manualStopLoss),
+      takeProfit: Number(manualTakeProfit),
+      martingaleEnabled: manualMartingale,
+      multiplier: Number(manualMultiplier),
+      duration,
     };
     localStorage.setItem("deriv_bot_config", JSON.stringify(config));
     setBotMessage(`${config.name} saved on this device. It will not place trades automatically.`);
@@ -736,6 +1183,12 @@ export default function HomePage() {
     setBotStake(String(bot.stake));
     setStake(String(bot.stake));
     setMaxTrades(String(bot.maxTrades));
+    setManualMaxTrades(String(bot.maxTrades));
+    if (bot.stopLoss !== undefined) setManualStopLoss(String(bot.stopLoss));
+    if (bot.takeProfit !== undefined) setManualTakeProfit(String(bot.takeProfit));
+    if (bot.martingaleEnabled !== undefined) setManualMartingale(bot.martingaleEnabled);
+    if (bot.multiplier !== undefined) setManualMultiplier(String(bot.multiplier));
+    if (bot.duration !== undefined) setDuration(bot.duration);
     document.getElementById("bot-builder")?.scrollIntoView({ behavior: "smooth" });
     setBotMessage(`${bot.name} template loaded. Review settings before saving.`);
   }
@@ -959,8 +1412,9 @@ export default function HomePage() {
         stake: run.baseStake,
         message: `Waiting for five consecutive ${run.target === "EVEN" ? "odd" : "even"} last digits on ${run.symbol}.`,
       });
-      await client.subscribeTicks(run.symbol, (tick) => handleMaster5Tick(run, tick));
-      if (!run.running) client.close();
+      if (!marketDataClientRef.current) {
+        await client.subscribeTicks(run.symbol, (tick) => handleMaster5Tick(run, tick));
+      }
     } catch (error) {
       run.running = false;
       run.client?.close();
@@ -975,7 +1429,7 @@ export default function HomePage() {
   }
 
   function requestMaster5Start() {
-    if (masterIsActive || !validateMaster5()) return;
+    if (masterIsActive || manualIsActive || confirmLive || confirmManualLive || tradeBusy || !validateMaster5()) return;
     if (isLive) setConfirmMasterLive(true);
     else void launchMaster5();
   }
@@ -1036,7 +1490,7 @@ export default function HomePage() {
           <div><strong>Stay in control</strong><small>Review strategy limits before starting automation.</small></div>
           </div>
           {activeAccount ? (
-          <button className="text-button" type="button" disabled={masterIsActive} onClick={disconnect}>Disconnect account</button>
+          <button className="text-button" type="button" disabled={masterIsActive || manualIsActive} onClick={disconnect}>Disconnect account</button>
           ) : (
             <button className="text-button" type="button" onClick={connectDerivAccount}>Connect Deriv</button>
           )}
@@ -1055,7 +1509,7 @@ export default function HomePage() {
                 className="account-select"
                 aria-label="Select Deriv account"
                 value={selectedLoginId}
-                disabled={masterIsActive || confirmLive || confirmMasterLive}
+                disabled={masterIsActive || manualIsActive || confirmLive || confirmMasterLive || confirmManualLive}
                 onChange={(event) => {
                   setSelectedLoginId(event.target.value);
                   setAccountError("");
@@ -1068,7 +1522,7 @@ export default function HomePage() {
                 ))}
               </select>
             )}
-            <button className="top-connect" type="button" disabled={masterIsActive || confirmLive || confirmMasterLive} onClick={connectDerivAccount}>
+            <button className="top-connect" type="button" disabled={masterIsActive || manualIsActive || confirmLive || confirmMasterLive || confirmManualLive} onClick={connectDerivAccount}>
               {activeAccount ? "Add account" : "Connect Deriv"}
             </button>
           </div>
@@ -1116,7 +1570,7 @@ export default function HomePage() {
             <article className="metric-card">
               <div className="metric-heading"><span>Available synthetic indices</span><span className="metric-icon blue">⌁</span></div>
               <strong>{markets.length}</strong>
-              <small>Includes 1-second volatility indices</small>
+              <small>Includes Volatility and Jump indices</small>
             </article>
           </section>
 
@@ -1152,13 +1606,13 @@ export default function HomePage() {
                     />
                   </label>
                 )}
-                <label className="field-wrap"><span className="field-label">Duration</span><div className="field static-field">1 tick</div></label>
+                <label className="field-wrap"><span className="field-label">Duration</span><select className="field" value={duration} onChange={(event) => setDuration(Number(event.target.value))}>{TICK_DURATIONS.map((ticks) => <option key={ticks} value={ticks}>{ticks} {ticks === 1 ? "Tick" : "Ticks"}</option>)}</select></label>
               </div>
               <div className="trade-summary"><span>Contract</span><strong>{selectedMarket?.display_name ?? symbol} · {contractLabel(contract, barrier)}</strong><span>Stake limit</span><strong>0.35 – 1,000</strong></div>
               <button
                 className={`execute-button ${isLive ? "execute-live" : ""}`}
                 type="button"
-                disabled={!activeAccount || tradeBusy || digitMarkets.length === 0}
+                disabled={!activeAccount || tradeBusy || masterIsActive || manualIsActive || digitMarkets.length === 0}
                 onClick={() => {
                   setTradeError("");
                   void reviewTrade();
@@ -1166,7 +1620,7 @@ export default function HomePage() {
               >
                 {tradeBusy ? "Getting Deriv proposal…" : isLive ? "Review live digit trade" : "Review demo digit trade"}
               </button>
-              <p className="fine-print">Deriv digit contracts resolve on the next tick. Over/Under and Matches/Differs require a valid barrier digit. Review the proposal and account before confirming.</p>
+              <p className="fine-print">Review a single trade proposal here. For automatic repeat trades with session limits, use Manual Trade below.</p>
               {tradeError && <p className="feedback error-text" role="alert">{tradeError}</p>}
               {tradeMessage && <p className="feedback success-text" role="status">{tradeMessage}</p>}
             </section>
@@ -1176,10 +1630,10 @@ export default function HomePage() {
                 <div><span className="section-kicker">MARKET WATCH</span><h2>AI scanner</h2></div>
                 <span className="live-indicator"><i /> {marketLoading ? "LOADING MARKETS" : marketError ? "FALLBACK MARKETS" : "LIVE DATA"}</span>
               </div>
-              <p className="panel-description">Compare live synthetic indices, including 1-second volatility indices, by recent historical digit outcomes. No account login is needed to scan.</p>
+              <p className="panel-description">Compare live Volatility and Jump indices using recent ticks from the shared feed. No account login is needed to scan.</p>
               <div className="scanner-filters">
                 <label className="field-wrap">
-                  <span className="field-label">Minimum historical rate</span>
+                  <span className="field-label">Minimum observed frequency</span>
                   <select className="field" value={scanThreshold} onChange={(event) => setScanThreshold(event.target.value)}>
                     <option value="78">78% or higher</option>
                     <option value="80">80% or higher</option>
@@ -1204,16 +1658,25 @@ export default function HomePage() {
                 </label>
               </div>
               <button className="scan-button" type="button" disabled={scanBusy} onClick={() => void runScanner()}>
-                {scanBusy ? <><span className="spinner" /> Scanning synthetic indices…</> : "Scan markets now"}
+                {scanBusy ? <><span className="spinner" /> Scanning live indices…</> : "Scan live markets"}
               </button>
               {scanError && <p className="feedback error-text" role="alert">{scanError}</p>}
               {scanCompleted && bestScanResult && (
                 <div className="best-scan-result">
-                  <span className="best-scan-label">HIGHEST HISTORICAL FREQUENCY</span>
+                  <span className="best-scan-label">BEST CURRENT LIVE FREQUENCY · {bestScanResult.hitRate.toFixed(1)}%</span>
                   <strong>{bestScanResult.name} · {bestScanResult.contract}{bestScanResult.barrier === undefined ? "" : ` ${bestScanResult.barrier}`}</strong>
                   <span>{bestScanResult.hitRate.toFixed(1)}% ({bestScanResult.hits}/{bestScanResult.sampleSize} ticks)</span>
+                  <div className="scan-actions">
+                    <button className="execute-button" type="button" disabled={!activeAccount || manualIsActive || masterIsActive} onClick={() => requestManualStart({
+                      symbol: bestScanResult.symbol,
+                      contract: contractFromScanResult(bestScanResult),
+                      barrier: bestScanResult.barrier,
+                    })}>Run recommendation</button>
+                    <button className="outline-button" type="button" onClick={() => loadScanResultToBuilder(bestScanResult)}>Load to Bot Builder</button>
+                  </div>
                 </div>
               )}
+              {scanCoverage && <p className="feedback" role="status">{scanCoverage}</p>}
               {visibleScanResults.length > 0 ? (
                 <div className="scan-list">
                   {visibleScanResults.map((result, index) => (
@@ -1226,11 +1689,11 @@ export default function HomePage() {
                   ))}
                 </div>
               ) : scanCompleted ? (
-                <div className="empty-scanner"><strong>No results at {scanThreshold}%+</strong><span>{bestScanResult ? "The highest historical frequency is shown above; lower the filter to compare more results." : "Try another contract group or run a fresh scan."}</span></div>
+                <div className="empty-scanner"><strong>No results at {scanThreshold}%+</strong><span>{bestScanResult ? "The highest live frequency is shown above; lower the filter to compare more results." : "Try another contract group or run a fresh scan."}</span></div>
               ) : (
                 <div className="empty-scanner"><span className="scan-graphic">⌁</span><strong>Ranked digit results</strong><span>Scan recent ticks to compare Even/Odd, Over/Under, Matches, and Differs across synthetic indices.</span></div>
               )}
-              <div className="scanner-disclaimer">Percentages show historical frequency in the selected sample—not the chance of winning the next trade. Results do not account for payout or guarantee profit. This is a statistical scanner, not a predictive AI model.</div>
+              <div className="scanner-disclaimer">Percentages show observed frequency in the selected live sample—not the chance of winning the next trade. Results do not account for payout or guarantee profit. This is a statistical scanner, not a predictive AI model.</div>
             </section>
           </div>
 
@@ -1239,11 +1702,50 @@ export default function HomePage() {
               <div><span className="section-kicker">INSIGHTS</span><h2>Analysis tools</h2></div>
               <span className="muted-badge">Market data from Deriv</span>
             </div>
+            <DigitVisualizer symbol={symbol} stats={liveDigitStats} />
             <div className="analysis-content">
               <div className="analysis-icon">⌁</div>
-              <div><strong>Digit-contract ranking</strong><p>The scanner ranks historical digit-contract hit rates across synthetic indices. Compare sample size and contract barrier; past results do not forecast the next tick.</p></div>
+              <div><strong>Live digit analysis</strong><p>The visualizer and scanner reuse this page’s single public Deriv tick stream. Live frequency is descriptive—not a prediction of the next outcome.</p></div>
               <button className="outline-button" type="button" onClick={() => { document.getElementById("scanner")?.scrollIntoView({ behavior: "smooth" }); }}>Open scanner</button>
             </div>
+
+            <section className="manual-trade" aria-labelledby="manual-trade-title">
+              <div className="manual-heading">
+                <div><span className="section-kicker">TRADE MODE</span><h3 id="manual-trade-title">Manual Trade</h3></div>
+                <span className={`bot-status status-${manualView.status}`}>{manualView.status.toUpperCase()}</span>
+              </div>
+              <p className="panel-description">Start a repeated strategy on the selected Deriv account. It stops at Stop Loss, Take Profit, the trade limit, or the remaining-loss stake cap.</p>
+              <DigitVisualizer symbol={symbol} stats={liveDigitStats} />
+              <div className="manual-fields">
+                <label className="field-wrap"><span className="field-label">Market</span><select className="field" value={symbol} disabled={manualIsActive} onChange={(event) => setSymbol(event.target.value)}>{digitMarkets.map((market) => <option key={market.symbol} value={market.symbol}>{market.display_name} ({market.symbol})</option>)}</select></label>
+                <label className="field-wrap"><span className="field-label">Contract</span><select className="field" value={contract} disabled={manualIsActive} onChange={(event) => setContract(event.target.value as DigitContract)}>{DIGIT_CONTRACT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
+                {contractNeedsBarrier(contract) && <label className="field-wrap"><span className="field-label">Barrier / target digit</span><input className="field" type="number" min={contract === "DIGITOVER" ? 0 : contract === "DIGITUNDER" ? 1 : 0} max={contract === "DIGITOVER" ? 8 : 9} step="1" value={barrier} disabled={manualIsActive} onChange={(event) => setBarrier(event.target.value)} /></label>}
+                <label className="field-wrap"><span className="field-label">Stake ({currency || "USD"})</span><input className="field" type="number" min="0.35" max="1000" step="0.01" value={stake} disabled={manualIsActive} onChange={(event) => setStake(event.target.value)} /></label>
+                <label className="field-wrap"><span className="field-label">Duration</span><select className="field" value={duration} disabled={manualIsActive} onChange={(event) => setDuration(Number(event.target.value))}>{TICK_DURATIONS.map((ticks) => <option key={ticks} value={ticks}>{ticks} {ticks === 1 ? "Tick" : "Ticks"}</option>)}</select></label>
+                <label className="field-wrap"><span className="field-label">Stop Loss ({currency || "USD"})</span><input className="field" type="number" min="0.01" step="0.01" value={manualStopLoss} disabled={manualIsActive} onChange={(event) => setManualStopLoss(event.target.value)} /></label>
+                <label className="field-wrap"><span className="field-label">Take Profit ({currency || "USD"})</span><input className="field" type="number" min="0.01" step="0.01" value={manualTakeProfit} disabled={manualIsActive} onChange={(event) => setManualTakeProfit(event.target.value)} /></label>
+                <label className="field-wrap"><span className="field-label">Maximum trades (1–100)</span><input className="field" type="number" min="1" max="100" step="1" value={manualMaxTrades} disabled={manualIsActive} onChange={(event) => setManualMaxTrades(event.target.value)} /></label>
+                <label className="martingale-toggle"><input type="checkbox" checked={manualMartingale} disabled={manualIsActive} onChange={(event) => setManualMartingale(event.target.checked)} /><span>Martingale</span><small>{manualMartingale ? "On" : "Off"}</small></label>
+                {manualMartingale && <label className="field-wrap"><span className="field-label">Martingale multiplier</span><input className="field" type="number" min="1.01" max="5" step="0.1" value={manualMultiplier} disabled={manualIsActive} onChange={(event) => setManualMultiplier(event.target.value)} /></label>}
+              </div>
+              <div className="manual-summary">
+                <span>Trades <strong>{manualView.trades}</strong></span>
+                <span>Session P/L <strong className={manualView.profit > 0 ? "profit-positive" : manualView.profit < 0 ? "profit-negative" : ""}>{currency || "—"} {manualView.profit.toFixed(2)}</strong></span>
+                <span>Next stake <strong>{currency || "—"} {manualView.stake.toFixed(2)}</strong></span>
+              </div>
+              {manualIsActive ? (
+                <button className="outline-button stop-bot-button" type="button" onClick={() => {
+                  const run = manualRunRef.current;
+                  if (run) stopManualRun(run, "Stopped by you.");
+                }}>Stop strategy</button>
+              ) : (
+                <button className={`execute-button ${isLive ? "execute-live" : ""}`} type="button" disabled={!activeAccount || manualIsActive || masterIsActive || marketLoading} onClick={() => requestManualStart()}>
+                  {isLive ? "Run strategy · confirm real account" : "Run strategy on demo"}
+                </button>
+              )}
+              {manualView.message && <p className={`feedback ${manualView.status === "error" ? "error-text" : ""}`} role="status">{manualView.message}</p>}
+              <p className="fine-print">Martingale multiplies exposure and may lose your full available stake. Live runs require confirmation; stop requests take effect after any open contract settles.</p>
+            </section>
           </section>
 
           <section className="panel builder-panel" id="bot-builder">
@@ -1258,10 +1760,15 @@ export default function HomePage() {
               <label className="field-wrap"><span className="field-label">Digit contract</span><select className="field" value={contract} onChange={(event) => setContract(event.target.value as DigitContract)}>{DIGIT_CONTRACT_OPTIONS.map((option) => <option key={option.value} value={option.value}>{option.label}</option>)}</select></label>
               {contractNeedsBarrier(contract) && <label className="field-wrap"><span className="field-label">Barrier digit</span><input className="field" type="number" min={contract === "DIGITOVER" ? 0 : contract === "DIGITUNDER" ? 1 : 0} max={contract === "DIGITOVER" ? 8 : 9} step="1" value={barrier} onChange={(event) => setBarrier(event.target.value)} /></label>}
               <label className="field-wrap"><span className="field-label">Stake per trade</span><input className="field" type="number" min="0.35" max="1000" step="0.01" value={botStake} onChange={(event) => setBotStake(event.target.value)} /></label>
-              <label className="field-wrap"><span className="field-label">Daily trade limit</span><input className="field" type="number" min="1" max="20" step="1" value={maxTrades} onChange={(event) => setMaxTrades(event.target.value)} /></label>
+              <label className="field-wrap"><span className="field-label">Maximum trades</span><input className="field" type="number" min="1" max="100" step="1" value={maxTrades} onChange={(event) => setMaxTrades(event.target.value)} /></label>
+              <label className="field-wrap"><span className="field-label">Stop Loss</span><input className="field" type="number" min="0.01" step="0.01" value={manualStopLoss} onChange={(event) => setManualStopLoss(event.target.value)} /></label>
+              <label className="field-wrap"><span className="field-label">Take Profit</span><input className="field" type="number" min="0.01" step="0.01" value={manualTakeProfit} onChange={(event) => setManualTakeProfit(event.target.value)} /></label>
+              <label className="field-wrap"><span className="field-label">Tick duration</span><select className="field" value={duration} onChange={(event) => setDuration(Number(event.target.value))}>{TICK_DURATIONS.map((ticks) => <option key={ticks} value={ticks}>{ticks} {ticks === 1 ? "Tick" : "Ticks"}</option>)}</select></label>
+              <label className="martingale-toggle"><input type="checkbox" checked={manualMartingale} onChange={(event) => setManualMartingale(event.target.checked)} /><span>Martingale</span><small>{manualMartingale ? "On" : "Off"}</small></label>
+              {manualMartingale && <label className="field-wrap"><span className="field-label">Multiplier</span><input className="field" type="number" min="1.01" max="5" step="0.1" value={manualMultiplier} onChange={(event) => setManualMultiplier(event.target.value)} /></label>}
             </div>
             <div className="builder-footer">
-              <p className="fine-print">Automated bot execution is not enabled. Use the trade ticket to review and submit each order yourself.</p>
+              <p className="fine-print">Saving stores a local preset only. To execute a strategy, review it in Manual Trade; real-account runs require confirmation.</p>
               <button className="outline-button gold-outline" type="button" onClick={saveBot}>Save strategy</button>
             </div>
             {botMessage && <p className="feedback" role="status">{botMessage}</p>}
@@ -1328,7 +1835,7 @@ export default function HomePage() {
                       if (run) stopMaster5(run, "Stopped by you.");
                     }}>Stop bot</button>
                   ) : (
-                    <button className="execute-button master-start" type="button" disabled={!activeAccount || !digitMarkets.some((market) => market.symbol === symbol)} onClick={requestMaster5Start}>
+                    <button className="execute-button master-start" type="button" disabled={!activeAccount || manualIsActive || !digitMarkets.some((market) => market.symbol === symbol)} onClick={requestMaster5Start}>
                       {masterView.status === "starting" ? "Starting…" : `Start Master 5 · ${isLive ? "LIVE" : "DEMO"}`}
                     </button>
                   )}
@@ -1373,7 +1880,7 @@ export default function HomePage() {
             <p>{isLive ? "Confirming submits this order to your real Deriv account. You could lose the full stake." : "Review the Deriv proposal before submitting this demo order."}</p>
             <div className="confirm-details">
               <span>Account</span><strong>{activeAccount.loginId}</strong>
-              <span>Trade</span><strong>{preparedProposal.symbol} · {contractLabel(preparedProposal.contract, preparedProposal.barrier ?? "")} · 1 tick</strong>
+              <span>Trade</span><strong>{preparedProposal.symbol} · {contractLabel(preparedProposal.contract, preparedProposal.barrier ?? "")} · {preparedProposal.duration} {preparedProposal.duration === 1 ? "tick" : "ticks"}</strong>
               <span>Stake</span><strong>{currency || activeAccount.currency} {preparedProposal.amount.toFixed(2)}</strong>
               <span>Deriv price</span><strong>{currency || activeAccount.currency} {preparedProposal.askPrice.toFixed(2)}</strong>
               {preparedProposal.payout !== undefined && <><span>Potential payout</span><strong>{currency || activeAccount.currency} {preparedProposal.payout.toFixed(2)}</strong></>}
@@ -1403,6 +1910,32 @@ export default function HomePage() {
                 setConfirmMasterLive(false);
                 void launchMaster5();
               }}>Start live bot</button>
+            </div>
+          </section>
+        </div>
+      )}
+      {confirmManualLive && activeAccount && pendingManualConfigRef.current && (
+        <div className="modal-backdrop" role="presentation">
+          <section className="confirm-modal" role="dialog" aria-modal="true" aria-labelledby="manual-live-title">
+            <span className="modal-warning">AUTOMATED RUN · REAL MONEY</span>
+            <h2 id="manual-live-title">Confirm repeated trades on your real account?</h2>
+            <p>This run will buy successive contracts without asking again for each trade. Losses are possible; Martingale can increase stakes. Stop it manually at any time.</p>
+            <div className="confirm-details">
+              <span>Account</span><strong>{activeAccount.loginId}</strong>
+              <span>Strategy</span><strong>{pendingManualConfigRef.current.symbol} · {contractLabel(pendingManualConfigRef.current.contract, pendingManualConfigRef.current.barrier ?? "")}</strong>
+              <span>Stake / duration</span><strong>{currency || activeAccount.currency} {pendingManualConfigRef.current.stake.toFixed(2)} · {pendingManualConfigRef.current.duration} ticks</strong>
+              <span>Session limits</span><strong>+{pendingManualConfigRef.current.takeProfit} / −{pendingManualConfigRef.current.stopLoss} · {pendingManualConfigRef.current.maxTrades} trades</strong>
+              <span>Martingale</span><strong>{pendingManualConfigRef.current.martingaleEnabled ? `${pendingManualConfigRef.current.multiplier}×` : "Off"}</strong>
+            </div>
+            <div className="modal-actions">
+              <button className="outline-button" type="button" onClick={() => {
+                setConfirmManualLive(false);
+                pendingManualConfigRef.current = null;
+              }}>Cancel</button>
+              <button className="execute-button execute-live" type="button" onClick={() => {
+                const config = pendingManualConfigRef.current;
+                if (config) void launchManualRun(config);
+              }}>Confirm and start live run</button>
             </div>
           </section>
         </div>

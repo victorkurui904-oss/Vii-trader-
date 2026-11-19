@@ -47,7 +47,8 @@ button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible
 .side-label, .section-kicker, .banner-kicker { color: #7d8ba3; font-size: 10px; font-weight: 850; letter-spacing: .15em; }
 .side-label { margin: 42px 10px 12px; }
 .nav-links { display: grid; gap: 5px; }
-.nav-link { display: flex; align-items: center; gap: 13px; padding: 11px 12px; border: 1px solid transparent; border-radius: 9px; color: #9aa9bf; font-size: 13px; text-decoration: none; transition: .18s ease; }
+.nav-link { display: flex; width: 100%; align-items: center; gap: 13px; padding: 11px 12px; border: 1px solid transparent; border-radius: 9px; background: transparent; color: #9aa9bf; text-align: left; font-size: 13px; cursor: pointer; transition: .18s ease; }
+.brand-button { border: 0; background: transparent; text-align: left; cursor: pointer; }
 .nav-link span { display: inline-grid; width: 19px; place-items: center; color: #8092ad; font-size: 17px; }
 .nav-link:hover, .nav-link.active { border-color: #243a5a; background: #122541; color: #f6f9ff; }
 .nav-link.active span { color: var(--gold); }
@@ -108,6 +109,7 @@ button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible
 .mode-tag.live { border-color: rgba(242,198,109,.35); background: rgba(242,198,109,.08); color: var(--gold); }
 
 .work-grid { display: grid; grid-template-columns: minmax(0, .94fr) minmax(0, 1.06fr); align-items: start; gap: 15px; margin-top: 17px; }
+.page-view-grid { grid-template-columns: minmax(0, 1fr); margin-top: 0; }
 .panel { min-width: 0; padding: 19px; }
 .panel-heading { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 17px; }
 .section-kicker { display: block; margin-bottom: 6px; font-size: 9px; }
@@ -278,7 +280,7 @@ button:focus-visible, a:focus-visible, select:focus-visible, input:focus-visible
   .brand { padding: 0 2px; }
   .side-label, .sidebar-bottom { display: none; }
   .nav-links { display: flex; overflow-x: auto; gap: 4px; margin-top: 11px; padding-bottom: 2px; }
-  .nav-link { flex: 0 0 auto; gap: 7px; padding: 8px 9px; font-size: 10px; }
+  .nav-link { width: auto; flex: 0 0 auto; gap: 7px; padding: 8px 9px; font-size: 10px; }
   .nav-link span { font-size: 14px; }
   .main-column { margin-left: 0; }
   .topbar { min-height: 58px; }

@@ -34,6 +34,7 @@ type ScanResult = {
 };
 
 type ScanCategory = "ALL" | "PARITY" | "OVER_UNDER" | "MATCHES_DIFFERS";
+type WorkspaceView = "dashboard" | "manualTrade" | "botBuilder" | "analysis" | "freeBots";
 type DigitContract =
   | "DIGITEVEN"
   | "DIGITODD"
@@ -319,6 +320,7 @@ function DigitVisualizer({
 
 export default function HomePage() {
   const [showIntro, setShowIntro] = useState(true);
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("dashboard");
   const [accounts, setAccounts] = useState<DerivAccount[]>([]);
   const [selectedLoginId, setSelectedLoginId] = useState("");
   const [accountError, setAccountError] = useState("");
@@ -1074,7 +1076,7 @@ export default function HomePage() {
     setBotName(`AI scan ${result.symbol} ${result.contract}`);
     setBotStake(stake);
     setMaxTrades(manualMaxTrades);
-    document.getElementById("bot-builder")?.scrollIntoView({ behavior: "smooth" });
+    navigateToView("botBuilder");
     setBotMessage(`Loaded ${result.symbol} · ${result.contract}${result.barrier === undefined ? "" : ` ${result.barrier}`} from live digit statistics. Review risk settings before saving.`);
   }
 
@@ -1175,7 +1177,7 @@ export default function HomePage() {
       setSymbol(bot.symbol);
       setMasterStake(String(bot.stake));
       setMasterParity("EVEN");
-      document.getElementById("master-5-builder")?.scrollIntoView({ behavior: "smooth" });
+      navigateToView("botBuilder");
       setMasterView((view) => ({
         ...view,
         message: "Master 5 loaded. Choose the target parity and review the risk limits.",
@@ -1195,7 +1197,7 @@ export default function HomePage() {
     if (bot.martingaleEnabled !== undefined) setManualMartingale(bot.martingaleEnabled);
     if (bot.multiplier !== undefined) setManualMultiplier(String(bot.multiplier));
     if (bot.duration !== undefined) setDuration(bot.duration);
-    document.getElementById("bot-builder")?.scrollIntoView({ behavior: "smooth" });
+    navigateToView("botBuilder");
     setBotMessage(`${bot.name} template loaded. Review settings before saving.`);
   }
 
@@ -1452,6 +1454,18 @@ export default function HomePage() {
     .slice(0, 20);
 
   const selectedMarket = markets.find((market) => market.symbol === symbol);
+  const workspaceTitle = {
+    dashboard: "Dashboard",
+    manualTrade: "Manual Trade",
+    botBuilder: "Bot Builder",
+    analysis: "Analysis Tools",
+    freeBots: "Free Bots",
+  }[workspaceView];
+
+  function navigateToView(view: WorkspaceView) {
+    setWorkspaceView(view);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
 
   if (showIntro) {
     return (
@@ -1469,26 +1483,23 @@ export default function HomePage() {
   return (
     <main className="dashboard">
       <aside className="sidebar">
-        <a className="brand" href="#overview" aria-label="BurnitorTrader home">
+        <button className="brand brand-button" type="button" onClick={() => navigateToView("dashboard")} aria-label="BurnitorTrader dashboard">
           <span className="brand-mark">B</span>
           <span>Burnitor<span className="brand-light">Trader</span></span>
-        </a>
+        </button>
         <p className="side-label">WORKSPACE</p>
         <nav className="nav-links" aria-label="Dashboard">
-          <a className="nav-link active" href="#overview"><span>◈</span> Overview</a>
-          <a className="nav-link" href="#trade"><span>↗</span> Trade</a>
-          <a className="nav-link" href="#bot-builder"><span>⚙</span> Bot builder</a>
-          <a className="nav-link" href="#analysis"><span>⌁</span> Analysis tools</a>
-          <a className="nav-link" href="#free-bots"><span>✦</span> Free bots</a>
-          <a
-            className="nav-link"
-            href="#scanner"
-            onClick={() => {
-              window.setTimeout(() => void runScanner(), 0);
-            }}
-          >
-            <span>⌕</span> AI scanner
-          </a>
+          <button className={`nav-link ${workspaceView === "dashboard" ? "active" : ""}`} type="button" aria-current={workspaceView === "dashboard" ? "page" : undefined} onClick={() => navigateToView("dashboard")}><span>◈</span> Dashboard</button>
+          <button className={`nav-link ${workspaceView === "manualTrade" ? "active" : ""}`} type="button" aria-current={workspaceView === "manualTrade" ? "page" : undefined} onClick={() => navigateToView("manualTrade")}><span>↗</span> Manual Trade</button>
+          <button className={`nav-link ${workspaceView === "botBuilder" ? "active" : ""}`} type="button" aria-current={workspaceView === "botBuilder" ? "page" : undefined} onClick={() => navigateToView("botBuilder")}><span>⚙</span> Bot Builder</button>
+          <button className={`nav-link ${workspaceView === "analysis" ? "active" : ""}`} type="button" aria-current={workspaceView === "analysis" ? "page" : undefined} onClick={() => navigateToView("analysis")}><span>⌁</span> Analysis Tools</button>
+          <button className={`nav-link ${workspaceView === "freeBots" ? "active" : ""}`} type="button" aria-current={workspaceView === "freeBots" ? "page" : undefined} onClick={() => navigateToView("freeBots")}><span>✦</span> Free Bots</button>
+          <button className="nav-link" type="button" onClick={() => {
+            navigateToView("analysis");
+            window.setTimeout(() => void runScanner(), 0);
+          }}>
+            <span>⌕</span> AI Scanner
+          </button>
         </nav>
         <div className="sidebar-bottom">
           <div className="help-card">
@@ -1505,7 +1516,7 @@ export default function HomePage() {
 
       <div className="main-column">
         <header className="topbar">
-          <div className="breadcrumb">Workspace <span>/</span> Overview</div>
+          <div className="breadcrumb">Workspace <span>/</span> {workspaceTitle}</div>
           <div className="topbar-actions">
             <span className={`connection-pill ${connection === "Connected" ? "online" : ""}`}>
               <span className="connection-dot" /> {connection}
@@ -1535,12 +1546,14 @@ export default function HomePage() {
         </header>
 
         <div className="content">
+          {workspaceView === "dashboard" && (
+            <>
           <section className="welcome-banner" id="overview">
             <div className="banner-copy">
               <span className="banner-kicker">YOUR MARKETS. YOUR RULES.</span>
               <h1>Make your next move <span>with clarity.</span></h1>
               <p>Trade Deriv markets, explore strategy templates, and review market signals in one place.</p>
-              <a className="banner-button" href="#trade">Open trade ticket <span>→</span></a>
+              <button className="banner-button" type="button" onClick={() => navigateToView("manualTrade")}>Open trade ticket <span>→</span></button>
             </div>
             <div className="banner-art" aria-hidden="true">
               <div className="art-ring ring-one" />
@@ -1579,8 +1592,12 @@ export default function HomePage() {
               <small>Includes Volatility and Jump indices</small>
             </article>
           </section>
+            </>
+          )}
 
-          <div className="work-grid">
+          {(workspaceView === "manualTrade" || workspaceView === "analysis") && (
+          <div className="work-grid page-view-grid">
+            {workspaceView === "manualTrade" && (
             <section className="panel trade-panel" id="trade">
               <div className="panel-heading">
                 <div><span className="section-kicker">EXECUTION</span><h2>Trade ticket</h2></div>
@@ -1630,7 +1647,9 @@ export default function HomePage() {
               {tradeError && <p className="feedback error-text" role="alert">{tradeError}</p>}
               {tradeMessage && <p className="feedback success-text" role="status">{tradeMessage}</p>}
             </section>
+            )}
 
+            {workspaceView === "analysis" && (
             <section className="panel scanner-panel" id="scanner">
               <div className="panel-heading">
                 <div><span className="section-kicker">MARKET WATCH</span><h2>AI scanner</h2></div>
@@ -1701,9 +1720,14 @@ export default function HomePage() {
               )}
               <div className="scanner-disclaimer">Percentages show observed frequency in the selected live sample—not the chance of winning the next trade. Results do not account for payout or guarantee profit. This is a statistical scanner, not a predictive AI model.</div>
             </section>
+            )}
           </div>
+          )}
 
-          <section className="panel analysis-panel" id="analysis">
+          {(workspaceView === "analysis" || workspaceView === "manualTrade") && (
+          <section className="panel analysis-panel" id={workspaceView === "analysis" ? "analysis" : "manual-trade-page"}>
+            {workspaceView === "analysis" && (
+              <>
             <div className="panel-heading">
               <div><span className="section-kicker">INSIGHTS</span><h2>Analysis tools</h2></div>
               <span className="muted-badge">Market data from Deriv</span>
@@ -1714,7 +1738,10 @@ export default function HomePage() {
               <div><strong>Live digit analysis</strong><p>The visualizer and scanner reuse this page’s single public Deriv tick stream. Live frequency is descriptive—not a prediction of the next outcome.</p></div>
               <button className="outline-button" type="button" onClick={() => { document.getElementById("scanner")?.scrollIntoView({ behavior: "smooth" }); }}>Open scanner</button>
             </div>
+              </>
+            )}
 
+            {workspaceView === "manualTrade" && (
             <section className="manual-trade" aria-labelledby="manual-trade-title">
               <div className="manual-heading">
                 <div><span className="section-kicker">TRADE MODE</span><h3 id="manual-trade-title">Manual Trade</h3></div>
@@ -1752,8 +1779,11 @@ export default function HomePage() {
               {manualView.message && <p className={`feedback ${manualView.status === "error" ? "error-text" : ""}`} role="status">{manualView.message}</p>}
               <p className="fine-print">Martingale multiplies exposure and may lose your full available stake. Live runs require confirmation; stop requests take effect after any open contract settles.</p>
             </section>
+            )}
           </section>
+          )}
 
+          {workspaceView === "botBuilder" && (
           <section className="panel builder-panel" id="bot-builder">
             <div className="panel-heading">
             <div><span className="section-kicker">STRATEGY WORKSPACE</span><h2>Bot builder</h2></div>
@@ -1851,7 +1881,9 @@ export default function HomePage() {
               <p className="fine-print">Live mode submits trades automatically after the one-time start confirmation. Martingale increases exposure and can lose money rapidly; stop, trade-count, and stake caps are enforced in this browser session.</p>
             </section>
           </section>
+          )}
 
+          {workspaceView === "freeBots" && (
           <section className="free-section" id="free-bots">
             <div className="panel-heading">
               <div><span className="section-kicker">STARTER COLLECTION</span><h2>Free bot templates</h2></div>
@@ -1870,6 +1902,7 @@ export default function HomePage() {
               ))}
             </div>
           </section>
+          )}
 
           <footer className="footer">
             <span>BurnitorTrader</span>

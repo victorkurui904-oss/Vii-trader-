@@ -77,23 +77,40 @@ export async function GET(request: Request) {
 
   const accounts = [];
   for (const account of accountsResponse.data) {
+    let balance: number | undefined;
+    if (typeof account.balance === "number") {
+      balance = account.balance;
+    } else if (
+      typeof account.balance === "string" &&
+      account.balance.trim() !== ""
+    ) {
+      const parsedBalance = Number(account.balance);
+      if (Number.isFinite(parsedBalance)) balance = parsedBalance;
+    }
+
     if (
       typeof account.account_id !== "string" ||
+      account.account_id.length === 0 ||
       (account.account_type !== "demo" && account.account_type !== "real") ||
       typeof account.currency !== "string" ||
-      typeof account.balance !== "number" ||
-      account.status !== "active"
+      account.currency.length === 0 ||
+      balance === undefined ||
+      (account.status !== undefined &&
+        account.status !== "active" &&
+        account.status !== "inactive")
     ) {
       return Response.json(
         { error: "Deriv returned an incomplete account record." },
         { status: 502, headers: noStoreHeaders },
       );
     }
+    if (account.status === "inactive") continue;
+
     accounts.push({
       accountId: account.account_id,
       loginId: account.account_id,
       currency: account.currency,
-      balance: account.balance,
+      balance,
       isVirtual: account.account_type === "demo",
     });
   }

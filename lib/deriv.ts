@@ -14,9 +14,10 @@ export type DerivResponse = {
   proposal?: { id?: string; ask_price?: number; payout?: number };
   buy?: { contract_id?: number; buy_price?: number; payout?: number };
   active_symbols?: Array<{
-    symbol: string;
-    display_name: string;
+    underlying_symbol: string;
+    underlying_symbol_name: string;
     market: string;
+    pip_size: number;
   }>;
   history?: { prices?: Array<number | string>; pip_size?: number };
   pip_size?: number;

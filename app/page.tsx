@@ -19,6 +19,7 @@ type Market = {
   symbol: string;
   display_name: string;
   market: string;
+  pip_size?: number;
 };
 
 type ScanResult = {
@@ -298,9 +299,14 @@ export default function HomePage() {
         const response = await client.request({ active_symbols: "brief" });
         if (cancelled) return;
 
-        const available = (response.active_symbols ?? []).filter(
-          (market) => market.market === "synthetic_index",
-        );
+        const available = (response.active_symbols ?? [])
+          .filter((market) => market.market === "synthetic_index")
+          .map((market) => ({
+            symbol: market.underlying_symbol,
+            display_name: market.underlying_symbol_name,
+            market: market.market,
+            pip_size: market.pip_size,
+          }));
         if (available.length === 0) {
           throw new Error("Deriv returned no active synthetic indices.");
         }
@@ -555,9 +561,11 @@ export default function HomePage() {
         currency: currency || activeAccount.currency,
         duration: 1,
         duration_unit: "t",
-        symbol,
+        underlying_symbol: symbol,
       };
-      if (contractNeedsBarrier(contract)) proposalRequest.barrier = barrierValue;
+      if (contractNeedsBarrier(contract)) {
+        proposalRequest.barrier = String(barrierValue);
+      }
       const proposalResponse = await client.request(proposalRequest);
       const proposal = proposalResponse.proposal;
       if (!proposal?.id || typeof proposal.ask_price !== "number") {
@@ -641,28 +649,31 @@ export default function HomePage() {
     setScanCompleted(false);
     let client: DerivClient | undefined;
     try {
-      const scanClient = await connectDeriv(activeAccount?.accountId);
+      const scanClient = await connectDeriv();
       client = scanClient;
       const results = await Promise.all(
         syntheticMarkets.map(async (market) => {
-          const [tickResponse, historyResponse] = await Promise.all([
-            scanClient.request({ ticks: market.symbol }),
-            scanClient.request({
-              ticks_history: market.symbol,
-              count: Number(scanSampleSize),
-              end: "latest",
-              style: "ticks",
-            }),
-          ]);
+          const historyResponse = await scanClient.request({
+            ticks_history: market.symbol,
+            count: Number(scanSampleSize),
+            end: "latest",
+            style: "ticks",
+          });
           const history = historyResponse.history;
           if (!history?.prices?.length) {
             throw new Error(`Deriv returned no tick history for ${market.symbol}.`);
           }
-          return scanDigitContracts(
-            market,
-            history.prices,
-            tickResponse.tick?.pip_size ?? tickResponse.pip_size ?? history.pip_size,
-          );
+          const pipSize =
+            market.pip_size ?? historyResponse.pip_size ?? history.pip_size;
+          if (
+            typeof pipSize !== "number" ||
+            !Number.isInteger(pipSize) ||
+            pipSize < 0 ||
+            pipSize > 10
+          ) {
+            throw new Error(`Deriv returned an invalid price precision for ${market.symbol}.`);
+          }
+          return scanDigitContracts(market, history.prices, pipSize);
         }),
       );
       setScanResults(
@@ -780,7 +791,7 @@ export default function HomePage() {
         currency: run.currency,
         duration: 1,
         duration_unit: "t",
-        symbol: run.symbol,
+        underlying_symbol: run.symbol,
       });
       const proposal = proposalResponse.proposal;
       if (!proposal?.id || typeof proposal.ask_price !== "number") {

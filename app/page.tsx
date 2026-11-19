@@ -8,9 +8,10 @@ import {
 } from "../lib/deriv";
 
 type DerivAccount = {
+  accountId: string;
   loginId: string;
-  token: string;
   currency: string;
+  balance: number;
   isVirtual: boolean;
 };
 
@@ -77,10 +78,6 @@ type BotView = {
   message: string;
 };
 
-const APP_ID = process.env.NEXT_PUBLIC_DERIV_APP_ID ?? "";
-const REDIRECT_URL =
-  process.env.NEXT_PUBLIC_DERIV_REDIRECT_URL ??
-  "https://burnitortrader.site/auth/deriv/callback";
 const FALLBACK_MARKETS: Market[] = [
   { symbol: "R_10", display_name: "Volatility 10 Index", market: "synthetic_index" },
   { symbol: "R_15", display_name: "Volatility 15 Index", market: "synthetic_index" },
@@ -114,6 +111,23 @@ const DIGIT_CONTRACT_OPTIONS: Array<{ value: DigitContract; label: string }> = [
   { value: "DIGITMATCH", label: "Matches" },
   { value: "DIGITDIFF", label: "Differs" },
 ];
+
+function base64UrlEncode(bytes: Uint8Array) {
+  const binary = Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+
+function isDerivAccount(value: unknown): value is DerivAccount {
+  if (!value || typeof value !== "object") return false;
+  const account = value as Record<string, unknown>;
+  return (
+    typeof account.accountId === "string" &&
+    typeof account.loginId === "string" &&
+    typeof account.currency === "string" &&
+    typeof account.balance === "number" &&
+    typeof account.isVirtual === "boolean"
+  );
+}
 
 function contractNeedsBarrier(contract: DigitContract) {
   return contract !== "DIGITEVEN" && contract !== "DIGITODD";
@@ -319,35 +333,64 @@ export default function HomePage() {
   }, []);
 
   useEffect(() => {
-    try {
-      const raw = sessionStorage.getItem("deriv_accounts");
-      if (!raw) {
-        setConnection("Not connected");
-        return;
-      }
+    sessionStorage.removeItem("deriv_accounts");
+    let cancelled = false;
 
-      const parsed = JSON.parse(raw) as DerivAccount[];
-      if (
-        !Array.isArray(parsed) ||
-        !parsed.every(
-          (account) =>
-            typeof account.loginId === "string" &&
-            typeof account.token === "string" &&
-            typeof account.isVirtual === "boolean",
-        )
-      ) {
-        throw new Error("Saved Deriv account data is invalid.");
-      }
+    void fetch("/api/deriv/accounts", { cache: "no-store" })
+      .then(async (response) => {
+        let payload: {
+          accounts?: unknown;
+          error?: string;
+        };
+        try {
+          payload = (await response.json()) as {
+            accounts?: unknown;
+            error?: string;
+          };
+        } catch {
+          throw new Error("The server returned an invalid account response.");
+        }
 
-      setAccounts(parsed);
-      const preferred = parsed.find((account) => account.isVirtual) ?? parsed[0];
-      setSelectedLoginId(preferred?.loginId ?? "");
-    } catch (error) {
-      setAccountError(
-        error instanceof Error ? error.message : "Could not read saved account data.",
-      );
-      setConnection("Not connected");
-    }
+        if (response.status === 401) {
+          if (!cancelled) {
+            setAccounts([]);
+            setSelectedLoginId("");
+            setConnection("Not connected");
+            if (payload.error && payload.error !== "Not connected to Deriv.") {
+              setAccountError(payload.error);
+            }
+          }
+          return;
+        }
+        if (!response.ok) {
+          throw new Error(payload.error || "Could not load Deriv accounts.");
+        }
+        if (
+          !Array.isArray(payload.accounts) ||
+          !payload.accounts.every(isDerivAccount)
+        ) {
+          throw new Error("Deriv returned an invalid account list.");
+        }
+
+        if (cancelled) return;
+        const parsed = payload.accounts as DerivAccount[];
+        setAccounts(parsed);
+        const preferred = parsed.find((account) => account.isVirtual) ?? parsed[0];
+        setSelectedLoginId(preferred?.loginId ?? "");
+        if (!preferred) setConnection("Not connected");
+      })
+      .catch((error: unknown) => {
+        if (!cancelled) {
+          setAccountError(
+            error instanceof Error ? error.message : "Could not load Deriv accounts.",
+          );
+          setConnection("Connection error");
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -357,7 +400,7 @@ export default function HomePage() {
     let client: DerivClient | undefined;
     setConnection("Connecting");
 
-    void connectDeriv(activeAccount.token)
+    void connectDeriv(activeAccount.accountId)
       .then(async (connectedClient) => {
         client = connectedClient;
         const balanceResponse = await client.request({ balance: 1 });
@@ -388,29 +431,83 @@ export default function HomePage() {
     };
   }, [activeAccount]);
 
-  function connectDerivAccount() {
-    if (!APP_ID || APP_ID === "YOUR_DERIV_APP_ID") {
-      setAccountError("The Deriv application ID is not configured.");
-      return;
+  async function connectDerivAccount() {
+    setAccountError("");
+    try {
+      const configResponse = await fetch("/api/deriv/oauth", {
+        cache: "no-store",
+      });
+      let config: {
+        clientId?: string;
+        redirectUri?: string;
+        error?: string;
+      };
+      try {
+        config = (await configResponse.json()) as {
+          clientId?: string;
+          redirectUri?: string;
+          error?: string;
+        };
+      } catch {
+        throw new Error("The server returned invalid Deriv OAuth settings.");
+      }
+      if (!configResponse.ok) {
+        throw new Error(config.error || "Deriv OAuth is not configured.");
+      }
+      if (!config.clientId || !config.redirectUri) {
+        throw new Error("Deriv OAuth is not configured.");
+      }
+
+      const verifierBytes = crypto.getRandomValues(new Uint8Array(32));
+      const codeVerifier = base64UrlEncode(verifierBytes);
+      const challengeDigest = await crypto.subtle.digest(
+        "SHA-256",
+        new TextEncoder().encode(codeVerifier),
+      );
+      const codeChallenge = base64UrlEncode(new Uint8Array(challengeDigest));
+      const state = crypto.randomUUID();
+
+      sessionStorage.setItem("deriv_oauth_state", state);
+      sessionStorage.setItem("deriv_pkce_verifier", codeVerifier);
+
+      const authorizeUrl = new URL("https://auth.deriv.com/oauth2/auth");
+      authorizeUrl.searchParams.set("response_type", "code");
+      authorizeUrl.searchParams.set("client_id", config.clientId);
+      authorizeUrl.searchParams.set("redirect_uri", config.redirectUri);
+      authorizeUrl.searchParams.set("scope", "trade");
+      authorizeUrl.searchParams.set("state", state);
+      authorizeUrl.searchParams.set("code_challenge", codeChallenge);
+      authorizeUrl.searchParams.set("code_challenge_method", "S256");
+      window.location.assign(authorizeUrl.toString());
+    } catch (error) {
+      sessionStorage.removeItem("deriv_oauth_state");
+      sessionStorage.removeItem("deriv_pkce_verifier");
+      setAccountError(
+        error instanceof Error
+          ? error.message
+          : "Could not start Deriv authorization.",
+      );
     }
-    const state = crypto.randomUUID();
-    sessionStorage.setItem("deriv_oauth_state", state);
-    const authorizeUrl = new URL("https://oauth.deriv.com/oauth2/authorize");
-    authorizeUrl.searchParams.set("app_id", APP_ID);
-    authorizeUrl.searchParams.set("redirect_uri", REDIRECT_URL);
-    authorizeUrl.searchParams.set("l", "EN");
-    authorizeUrl.searchParams.set("state", state);
-    window.location.assign(authorizeUrl.toString());
   }
 
-  function disconnect() {
+  async function disconnect() {
     const activeRun = masterRunRef.current;
     if (activeRun) void stopMaster5(activeRun, "Bot stopped because the account was disconnected.");
     tradeClientRef.current?.close();
     tradeClientRef.current = null;
     setPreparedProposal(null);
     setConfirmLive(false);
-    sessionStorage.removeItem("deriv_accounts");
+
+    try {
+      const response = await fetch("/api/deriv/oauth", { method: "DELETE" });
+      if (!response.ok) throw new Error("Could not disconnect the Deriv session.");
+    } catch (error) {
+      setAccountError(
+        error instanceof Error ? error.message : "Could not disconnect Deriv.",
+      );
+      return;
+    }
+
     setAccounts([]);
     setSelectedLoginId("");
     setBalance(null);
@@ -449,7 +546,7 @@ export default function HomePage() {
     tradeClientRef.current = null;
     let client: DerivClient | undefined;
     try {
-      client = await connectDeriv(activeAccount.token);
+      client = await connectDeriv(activeAccount.accountId);
       const proposalRequest: Record<string, unknown> = {
         proposal: 1,
         amount,
@@ -544,7 +641,7 @@ export default function HomePage() {
     setScanCompleted(false);
     let client: DerivClient | undefined;
     try {
-      const scanClient = await connectDeriv(activeAccount?.token);
+      const scanClient = await connectDeriv(activeAccount?.accountId);
       client = scanClient;
       const results = await Promise.all(
         syntheticMarkets.map(async (market) => {
@@ -838,7 +935,7 @@ export default function HomePage() {
     });
 
     try {
-      const client = await connectDeriv(activeAccount.token);
+      const client = await connectDeriv(activeAccount.accountId);
       run.client = client;
       if (!run.running) {
         client.close();

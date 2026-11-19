@@ -5,10 +5,10 @@ Deriv-connected trading dashboard built with Next.js.
 ## Run locally
 
 1. Install dependencies with `npm install`.
-2. Copy `.env.example` to `.env.local` and set your Deriv app ID and registered redirect URL.
-3. Register that exact redirect URL in the Deriv application settings, then start the server with `npm run dev`.
+2. Copy `.env.example` to `.env.local` and set your Deriv OAuth client ID and redirect URL.
+3. Register that exact redirect URL in the Deriv OAuth application settings and enable the `trade` scope. In production, set `DERIV_CLIENT_ID` and `DERIV_REDIRECT_URL` in the deployment environment and redeploy.
 
-The redirect URL must exactly match the URL registered in the Deriv application settings. Replace the `YOUR_DERIV_APP_ID` placeholder before connecting or loading market data.
+The redirect URL must exactly match the URL registered in the Deriv OAuth application settings. The production site uses `https://www.burnitortrader.site`; use `https://www.burnitortrader.site/auth/deriv/callback` consistently rather than the non-`www` domain, which redirects to `www`. The OAuth client ID and redirect URL are read by server routes, and access tokens are stored in an HTTP-only cookie rather than browser storage.
 
 ## Dashboard features
 

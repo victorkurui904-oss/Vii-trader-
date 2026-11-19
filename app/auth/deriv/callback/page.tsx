@@ -2,61 +2,73 @@
 
 import { useEffect, useState } from "react";
 
-type DerivAccount = {
-  loginId: string;
-  token: string;
-  currency: string;
-  isVirtual: boolean;
-};
-
 export default function DerivCallbackPage() {
   const [message, setMessage] = useState("Completing Deriv connection...");
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     window.history.replaceState({}, "", window.location.pathname);
+
+    const clearOAuthState = () => {
+      sessionStorage.removeItem("deriv_oauth_state");
+      sessionStorage.removeItem("deriv_pkce_verifier");
+    };
+
     const error = params.get("error");
     if (error) {
-      setMessage(params.get("error_description") || "Deriv authorization failed.");
-      sessionStorage.removeItem("deriv_oauth_state");
+      setMessage(
+        params.get("error_description") || "Deriv authorization failed.",
+      );
+      clearOAuthState();
       return;
     }
 
     const returnedState = params.get("state");
     const expectedState = sessionStorage.getItem("deriv_oauth_state");
+    const codeVerifier = sessionStorage.getItem("deriv_pkce_verifier");
+    const code = params.get("code");
 
     if (!expectedState || returnedState !== expectedState) {
       setMessage("Authorization state mismatch. Please try again.");
-      sessionStorage.removeItem("deriv_oauth_state");
+      clearOAuthState();
       return;
     }
 
-    sessionStorage.removeItem("deriv_oauth_state");
-
-    const accounts: DerivAccount[] = [];
-
-    for (let index = 1; index <= 20; index += 1) {
-      const loginId = params.get(`acct${index}`);
-      const token = params.get(`token${index}`);
-      const currency = params.get(`cur${index}`) ?? "";
-
-      if (loginId && token) {
-        accounts.push({
-          loginId,
-          token,
-          currency,
-          isVirtual: loginId.startsWith("VRTC"),
-        });
-      }
-    }
-
-    if (accounts.length === 0) {
-      setMessage("No Deriv account was returned. Please try again.");
+    if (!code || !codeVerifier) {
+      setMessage("Deriv did not return a complete authorization response.");
+      clearOAuthState();
       return;
     }
 
-    sessionStorage.setItem("deriv_accounts", JSON.stringify(accounts));
-    window.location.replace("/");
+    void fetch("/api/deriv/oauth", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code, codeVerifier }),
+      cache: "no-store",
+    })
+      .then(async (response) => {
+        let payload: { error?: string } = {};
+        try {
+          payload = (await response.json()) as { error?: string };
+        } catch {
+          throw new Error("The server returned an invalid authorization response.");
+        }
+
+        if (!response.ok) {
+          throw new Error(payload.error || "Could not complete Deriv authorization.");
+        }
+
+        clearOAuthState();
+        window.location.replace("/");
+      })
+      .catch((exchangeError: unknown) => {
+        clearOAuthState();
+        setMessage(
+          exchangeError instanceof Error
+            ? exchangeError.message
+            : "Could not complete Deriv authorization.",
+        );
+      });
   }, []);
 
   return (

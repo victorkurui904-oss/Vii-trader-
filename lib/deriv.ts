@@ -1,6 +1,5 @@
-const DERIV_WS_URL = `wss://ws.derivws.com/websockets/v3?app_id=${
-  process.env.NEXT_PUBLIC_DERIV_APP_ID ?? ""
-}`;
+const DERIV_PUBLIC_WS_URL =
+  "wss://api.derivws.com/trading/v1/options/ws/public";
 
 export type DerivResponse = {
   req_id?: number;
@@ -46,15 +45,39 @@ export type DerivClient = {
   close: () => void;
 };
 
-export async function connectDeriv(token?: string): Promise<DerivClient> {
-  if (
-    !process.env.NEXT_PUBLIC_DERIV_APP_ID ||
-    process.env.NEXT_PUBLIC_DERIV_APP_ID === "YOUR_DERIV_APP_ID"
-  ) {
-    throw new Error("The Deriv application ID is not configured.");
+export async function connectDeriv(accountId?: string): Promise<DerivClient> {
+  let url = DERIV_PUBLIC_WS_URL;
+  if (accountId) {
+    let response: Response;
+    try {
+      response = await fetch("/api/deriv/accounts", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountId }),
+        cache: "no-store",
+      });
+    } catch {
+      throw new Error("Could not request an authenticated Deriv connection.");
+    }
+
+    let payload: { error?: string; url?: unknown };
+    try {
+      payload = (await response.json()) as { error?: string; url?: unknown };
+    } catch {
+      throw new Error("The server returned an invalid Deriv connection response.");
+    }
+    if (!response.ok) {
+      throw new Error(
+        payload.error || "Could not open an authenticated Deriv connection.",
+      );
+    }
+    if (typeof payload.url !== "string") {
+      throw new Error("Deriv did not return a WebSocket connection URL.");
+    }
+    url = payload.url;
   }
 
-  const socket = new WebSocket(DERIV_WS_URL);
+  const socket = new WebSocket(url);
   const pending = new Map<
     number,
     {
@@ -231,15 +254,6 @@ export async function connectDeriv(token?: string): Promise<DerivClient> {
       { once: true },
     );
   });
-
-  if (token) {
-    try {
-      await request({ authorize: token });
-    } catch (error) {
-      socket.close();
-      throw error;
-    }
-  }
 
   return {
     request,
